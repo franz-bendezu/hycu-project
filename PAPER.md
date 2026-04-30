@@ -95,7 +95,7 @@ This level specifies how the conceptual entities relate to one another and which
 This level translates the logical relationships into computable variables, database tables, and transformation rules for rendering and fabrication output.
 
 * **Parametric Variables (Formulas vs. Integers):** Rather than storing all dimensions as fixed values, the system stores some dimensions as formulas so they can respond dynamically to changes in product size or material thickness.  
-  * *Example:* Component\_Length \= Product\_Height \- (Material\_Thickness \* 2\)  
+  * *Example:* $$Component_{Length} = Product_{Height} - (Material_{Thickness} * 2)$$ 
 * **Spatial Instantiation (The Transformation Matrix):**  
   Joints are instantiated through translation and rotation values that determine the global position of each child component relative to its parent:  
   $$P_{global} = M_{translation} \cdot M_{rotation} \cdot P_{local} + P_{parent\_origin}$$
