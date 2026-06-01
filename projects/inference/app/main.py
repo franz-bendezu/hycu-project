@@ -3,24 +3,58 @@ from __future__ import annotations
 import base64
 import io
 import os
-from dataclasses import dataclass
-from collections import defaultdict
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
+from statistics import mean
 from urllib.parse import unquote_to_bytes
 
 import httpx
+import numpy as np
+import onnxruntime as ort  # type: ignore[import-not-found]
 from fastapi import FastAPI, HTTPException
-from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="Vision Inference Service", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Fail fast during service boot when the detector artifact is missing or invalid.
+    _detector()
+    yield
+
+
+app = FastAPI(title="Vision Inference Service", version="0.1.0", lifespan=lifespan)
 
 SUPPORTED_TYPES = ("cabinet", "desk", "shelf")
-HASH_SIZE = 16
 
 
 class InferRequest(BaseModel):
+    image_urls: list[str] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def validate_sources(self) -> "InferRequest":
+        if len(self.image_urls) > 12:
+            raise ValueError("Maximum 12 images per request")
+        for idx, value in enumerate(self.image_urls):
+            if len(value) < 8:
+                raise ValueError(f"image_urls[{idx}] is too short")
+        return self
+
+
+class Component(BaseModel):
+    name: str
+    kind: str
+    quantity: int = Field(..., ge=1)
+
+
+class InferImageResult(BaseModel):
+    detected_type: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    suggested_width: float = Field(..., gt=0)
+    suggested_height: float = Field(..., gt=0)
+    suggested_depth: float = Field(..., gt=0)
+    components: list[Component]
     image_url: str = Field(..., min_length=8)
 
 
@@ -30,24 +64,71 @@ class InferResponse(BaseModel):
     suggested_width: float = Field(..., gt=0)
     suggested_height: float = Field(..., gt=0)
     suggested_depth: float = Field(..., gt=0)
+    components: list[Component]
     image_url: str = Field(..., min_length=8)
+    images_analyzed: int = Field(default=1, ge=1)
+    image_results: list[InferImageResult]
 
 
-@dataclass(frozen=True)
-class ReferenceImage:
-    category: str
-    average_hash: int
-    difference_hash: int
-    edge_density: float
-    aspect_ratio: float
-    brightness: float
+class YoloDetector:
+    def __init__(self, model_path: Path, labels: tuple[str, ...], score_threshold: float) -> None:
+        if not model_path.exists():
+            raise RuntimeError(f"YOLO model not found at {model_path}")
+
+        try:
+            self._session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        except Exception as exc:  # pragma: no cover - provider/runtime error path
+            raise RuntimeError(f"Failed to load YOLO model from {model_path}: {exc}") from exc
+
+        model_inputs = self._session.get_inputs()
+        if len(model_inputs) != 1:
+            raise RuntimeError("YOLO model must expose exactly one input tensor")
+
+        input_tensor = model_inputs[0]
+        self.input_name = input_tensor.name
+        self.input_height, self.input_width = _resolve_input_size(input_tensor.shape)
+        self.labels = labels
+        self.model_path = model_path
+        self.score_threshold = score_threshold
+
+    def analyze(self, image: Image.Image) -> tuple[str, float, list[tuple[int, float]]]:
+        tensor = _preprocess(image, self.input_width, self.input_height)
+        outputs = self._session.run(None, {self.input_name: tensor})
+        return _decode_prediction(outputs, self.labels, self.score_threshold)
+
+    def classify(self, image: Image.Image) -> tuple[str, float]:
+        detected_type, confidence, _ = self.analyze(image)
+        return detected_type, confidence
 
 
-def _gallery_root() -> Path:
-    override = os.getenv("INFERENCE_GALLERY_ROOT")
+def _detector_model_path() -> Path:
+    override = os.getenv("INFERENCE_DETECTOR_ONNX")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[2] / "training" / "datasets" / "raw" / "images"
+    return Path(__file__).resolve().parents[1] / "models" / "detector.onnx"
+
+
+def _detector_labels() -> tuple[str, ...]:
+    raw = os.getenv("INFERENCE_LABELS")
+    if not raw:
+        return SUPPORTED_TYPES
+    labels = tuple(label.strip() for label in raw.split(",") if label.strip())
+    if not labels:
+        raise RuntimeError("INFERENCE_LABELS is set but empty")
+    return labels
+
+
+def _resolve_input_size(shape: list[int | str | None]) -> tuple[int, int]:
+    if len(shape) != 4:
+        raise RuntimeError(f"Unexpected YOLO input tensor rank: {len(shape)}")
+
+    height = shape[2]
+    width = shape[3]
+    if isinstance(height, int) and isinstance(width, int):
+        return height, width
+
+    fallback_size = int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))
+    return fallback_size, fallback_size
 
 
 def _decode_data_url(image_url: str) -> bytes:
@@ -78,106 +159,88 @@ def _open_image(image_bytes: bytes) -> Image.Image:
     return ImageOps.exif_transpose(image).convert("RGB")
 
 
-def _average_hash(image: Image.Image) -> int:
-    grayscale = image.convert("L").resize((HASH_SIZE, HASH_SIZE), Image.Resampling.LANCZOS)
-    pixels = list(grayscale.getdata())
-    mean = sum(pixels) / len(pixels)
-    value = 0
-    for pixel in pixels:
-        value = (value << 1) | int(pixel >= mean)
-    return value
+def _preprocess(image: Image.Image, width: int, height: int) -> np.ndarray:
+    resized = image.resize((width, height), Image.Resampling.BILINEAR)
+    array = np.asarray(resized, dtype=np.float32) / 255.0
+    chw = np.transpose(array, (2, 0, 1))
+    return np.expand_dims(chw, axis=0)
 
 
-def _difference_hash(image: Image.Image) -> int:
-    grayscale = image.convert("L").resize((HASH_SIZE + 1, HASH_SIZE), Image.Resampling.LANCZOS)
-    pixels = list(grayscale.getdata())
-    value = 0
-    for row in range(HASH_SIZE):
-        row_offset = row * (HASH_SIZE + 1)
-        for col in range(HASH_SIZE):
-            left = pixels[row_offset + col]
-            right = pixels[row_offset + col + 1]
-            value = (value << 1) | int(left >= right)
-    return value
+def _decode_prediction(
+    outputs: list[np.ndarray], labels: tuple[str, ...], threshold: float
+) -> tuple[str, float, list[tuple[int, float]]]:
+    if not outputs:
+        raise HTTPException(status_code=500, detail="YOLO model returned no outputs")
+
+    detections = _extract_detections(outputs[0], len(labels))
+    if not detections:
+        raise HTTPException(status_code=422, detail="YOLO model produced no detections")
+
+    category_scores: dict[str, float] = {label: 0.0 for label in labels}
+    for class_id, score in detections:
+        if class_id < 0 or class_id >= len(labels):
+            continue
+        category = labels[class_id]
+        category_scores[category] = max(category_scores[category], score)
+
+    best_category = max(category_scores, key=category_scores.get)
+    best_score = category_scores[best_category]
+
+    # Low confidence should not fail the full workflow; return the best-effort prediction
+    # and let downstream logic/UI decide how to handle weak confidence.
+    _ = threshold
+    return best_category, round(float(best_score), 3), detections
 
 
-def _hamming_distance(left: int, right: int) -> int:
-    return (left ^ right).bit_count()
+def _extract_detections(output: np.ndarray, num_labels: int) -> list[tuple[int, float]]:
+    tensor = np.array(output)
+    if tensor.ndim == 3 and tensor.shape[0] == 1:
+        tensor = tensor[0]
 
+    if tensor.ndim != 2:
+        return []
 
-def _edge_density(image: Image.Image) -> float:
-    edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
-    pixels = list(edges.getdata())
-    if not pixels:
-        return 0.0
-    strong_edges = sum(1 for value in pixels if value >= 48)
-    return strong_edges / len(pixels)
+    # Normalize to rows = detections, cols = features.
+    if tensor.shape[0] < tensor.shape[1]:
+        tensor = tensor.T
 
+    rows, cols = tensor.shape
+    detections: list[tuple[int, float]] = []
 
-def _image_features(image: Image.Image) -> tuple[int, int, float, float, float]:
-    width_px, height_px = image.size
-    aspect_ratio = width_px / max(height_px, 1)
-    brightness = ImageStat.Stat(image.convert("L")).mean[0] / 255.0
-    return (
-        _average_hash(image),
-        _difference_hash(image),
-        _edge_density(image),
-        aspect_ratio,
-        brightness,
-    )
+    if cols == 6:
+        for row in tensor:
+            score = float(row[4])
+            class_id = int(row[5])
+            detections.append((class_id, score))
+        return detections
 
+    if cols < 4 + num_labels:
+        return []
 
-def _distance(query: tuple[int, int, float, float, float], ref: ReferenceImage) -> float:
-    query_ahash, query_dhash, query_edge, query_aspect, query_brightness = query
-    max_distance = HASH_SIZE * HASH_SIZE
-    ahash_distance = _hamming_distance(query_ahash, ref.average_hash) / max_distance
-    dhash_distance = _hamming_distance(query_dhash, ref.difference_hash) / max_distance
-    edge_distance = abs(query_edge - ref.edge_density)
-    aspect_distance = min(1.0, abs(query_aspect - ref.aspect_ratio) / 1.8)
-    brightness_distance = abs(query_brightness - ref.brightness)
+    for row in tensor:
+        # YOLO exports commonly emit either [x,y,w,h,cls...] or [x,y,w,h,obj,cls...].
+        if cols >= 5 + num_labels:
+            objectness = float(row[4])
+            class_scores = row[5 : 5 + num_labels]
+            scores = class_scores * objectness
+        else:
+            scores = row[4 : 4 + num_labels]
 
-    return (
-        ahash_distance * 0.42
-        + dhash_distance * 0.34
-        + edge_distance * 0.12
-        + aspect_distance * 0.08
-        + brightness_distance * 0.04
-    )
+        class_id = int(np.argmax(scores))
+        score = float(scores[class_id])
+        detections.append((class_id, score))
+
+    return detections
 
 
 @lru_cache(maxsize=1)
-def _reference_gallery() -> tuple[ReferenceImage, ...]:
-    root = _gallery_root()
-    references: list[ReferenceImage] = []
-
-    for category in SUPPORTED_TYPES:
-        folder = root / category
-        if not folder.exists():
-            continue
-        for image_path in sorted(folder.iterdir()):
-            if not image_path.is_file():
-                continue
-            try:
-                with Image.open(image_path) as sample:
-                    normalized = ImageOps.exif_transpose(sample).convert("RGB")
-                    average_hash, difference_hash, edge_density, aspect_ratio, brightness = _image_features(normalized)
-            except (UnidentifiedImageError, OSError):
-                continue
-            references.append(
-                ReferenceImage(
-                    category=category,
-                    average_hash=average_hash,
-                    difference_hash=difference_hash,
-                    edge_density=edge_density,
-                    aspect_ratio=aspect_ratio,
-                    brightness=brightness,
-                )
-            )
-
-    if not references:
-        raise RuntimeError(f"No reference images found under {root}")
-
-    return tuple(references)
+def _detector() -> YoloDetector:
+    threshold = float(os.getenv("INFERENCE_CONFIDENCE_THRESHOLD", "0.25"))
+    return YoloDetector(
+        model_path=_detector_model_path(),
+        labels=_detector_labels(),
+        score_threshold=threshold,
+    )
 
 
 def _estimate_dimensions(category: str, image: Image.Image) -> tuple[float, float, float]:
@@ -196,49 +259,164 @@ def _estimate_dimensions(category: str, image: Image.Image) -> tuple[float, floa
     return 800.0, round(suggested_height, 1), 450.0
 
 
+def _normalize_component_name(label: str) -> str:
+    normalized = "_".join(label.strip().lower().replace("-", " ").split())
+    return normalized or "component"
+
+
+def _component_kind(label: str) -> str:
+    normalized = label.strip().lower()
+    if any(token in normalized for token in ("panel", "door", "shelf", "top", "bottom", "back", "side")):
+        return "panel"
+    if any(token in normalized for token in ("leg", "support", "brace", "apron", "rail")):
+        return "support"
+    return "assembly"
+
+
+def _components_from_detections(
+    detections: list[tuple[int, float]],
+    labels: tuple[str, ...],
+    threshold: float,
+    detected_type: str,
+) -> list[Component]:
+    counts: dict[str, tuple[str, int]] = {}
+    for class_id, score in detections:
+        if class_id < 0 or class_id >= len(labels) or score < threshold:
+            continue
+        label = labels[class_id]
+        name = _normalize_component_name(label)
+        kind = _component_kind(label)
+        current = counts.get(name)
+        if current is None:
+            counts[name] = (kind, 1)
+        else:
+            counts[name] = (current[0], current[1] + 1)
+
+    if not counts:
+        fallback_name = _normalize_component_name(detected_type)
+        return [Component(name=fallback_name, kind="assembly", quantity=1)]
+
+    return [
+        Component(name=name, kind=kind, quantity=quantity)
+        for name, (kind, quantity) in sorted(counts.items())
+    ]
+
+
+def _suggest_components(category: str) -> list[Component]:
+    if category == "desk":
+        return [
+            Component(name="desktop", kind="panel", quantity=1),
+            Component(name="left_side_panel", kind="panel", quantity=1),
+            Component(name="right_side_panel", kind="panel", quantity=1),
+            Component(name="back_panel", kind="panel", quantity=1),
+            Component(name="front_apron", kind="support", quantity=1),
+        ]
+
+    if category == "shelf":
+        return [
+            Component(name="top_panel", kind="panel", quantity=1),
+            Component(name="bottom_panel", kind="panel", quantity=1),
+            Component(name="left_side_panel", kind="panel", quantity=1),
+            Component(name="right_side_panel", kind="panel", quantity=1),
+            Component(name="shelf_panel", kind="panel", quantity=3),
+            Component(name="back_panel", kind="panel", quantity=1),
+        ]
+
+    return [
+        Component(name="top_panel", kind="panel", quantity=1),
+        Component(name="bottom_panel", kind="panel", quantity=1),
+        Component(name="left_side_panel", kind="panel", quantity=1),
+        Component(name="right_side_panel", kind="panel", quantity=1),
+        Component(name="door_panel", kind="panel", quantity=2),
+        Component(name="shelf_panel", kind="panel", quantity=3),
+        Component(name="back_panel", kind="panel", quantity=1),
+    ]
+
+
 def _classify(image: Image.Image) -> tuple[str, float]:
-    query = _image_features(image)
-    scores_by_category: dict[str, list[float]] = defaultdict(list)
-
-    for reference in _reference_gallery():
-        scores_by_category[reference.category].append(_distance(query, reference))
-
-    aggregated = []
-    for category, scores in scores_by_category.items():
-        top_scores = sorted(scores)[: min(3, len(scores))]
-        aggregated.append((sum(top_scores) / len(top_scores), category))
-
-    aggregated.sort(key=lambda item: item[0])
-    best_score, best_category = aggregated[0]
-    second_score = aggregated[1][0] if len(aggregated) > 1 else best_score
-
-    separation_bonus = max(0.0, second_score - best_score)
-    confidence = 1.0 - best_score * 0.9 + separation_bonus * 0.4
-    confidence = max(0.2, min(0.98, confidence))
-    return best_category, round(confidence, 3)
+    return _detector().classify(image)
 
 
-@app.get("/health")
-def health() -> dict:
-    try:
-        gallery_size = len(_reference_gallery())
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {"status": "ok", "reference_images": gallery_size}
-
-
-@app.post("/infer", response_model=InferResponse)
-def infer(payload: InferRequest) -> InferResponse:
-    image_bytes = _load_image_bytes(payload.image_url)
+def _infer_single(image_url: str) -> InferImageResult:
+    image_bytes = _load_image_bytes(image_url)
     image = _open_image(image_bytes)
-    detected_type, confidence = _classify(image)
+    detector = _detector()
+    if hasattr(detector, "analyze"):
+        detected_type, confidence, detections = detector.analyze(image)
+        labels = getattr(detector, "labels", SUPPORTED_TYPES)
+        threshold = float(getattr(detector, "score_threshold", 0.25))
+        components = _components_from_detections(
+            detections,
+            labels,
+            threshold,
+            detected_type,
+        )
+    else:
+        detected_type, confidence = detector.classify(image)
+        components = _suggest_components(detected_type)
     suggested_width, suggested_height, suggested_depth = _estimate_dimensions(detected_type, image)
-
-    return InferResponse(
+    return InferImageResult(
         detected_type=detected_type,
         confidence=confidence,
         suggested_width=suggested_width,
         suggested_height=suggested_height,
         suggested_depth=suggested_depth,
-        image_url=payload.image_url,
+        components=components,
+        image_url=image_url,
     )
+
+
+def _aggregate_components(results: list[InferImageResult]) -> list[Component]:
+    merged: dict[str, Component] = {}
+    for result in results:
+        for component in result.components:
+            current = merged.get(component.name)
+            if current is None or component.quantity > current.quantity:
+                merged[component.name] = Component(
+                    name=component.name,
+                    kind=component.kind,
+                    quantity=component.quantity,
+                )
+    return [merged[key] for key in sorted(merged)]
+
+
+def _aggregate_results(results: list[InferImageResult]) -> InferResponse:
+    scores_by_type: dict[str, float] = {}
+    for result in results:
+        scores_by_type[result.detected_type] = scores_by_type.get(result.detected_type, 0.0) + result.confidence
+
+    detected_type = max(scores_by_type, key=scores_by_type.get)
+    matching = [result for result in results if result.detected_type == detected_type]
+    confidence_source = matching if matching else results
+
+    return InferResponse(
+        detected_type=detected_type,
+        confidence=round(mean(item.confidence for item in confidence_source), 3),
+        suggested_width=round(mean(item.suggested_width for item in results), 1),
+        suggested_height=round(mean(item.suggested_height for item in results), 1),
+        suggested_depth=round(mean(item.suggested_depth for item in results), 1),
+        components=_aggregate_components(results),
+        image_url=results[0].image_url,
+        images_analyzed=len(results),
+        image_results=results,
+    )
+
+
+@app.get("/health")
+def health() -> dict:
+    try:
+        detector = _detector()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "model_path": str(detector.model_path),
+        "labels": list(detector.labels),
+        "confidence_threshold": detector.score_threshold,
+    }
+
+
+@app.post("/infer", response_model=InferResponse)
+def infer(payload: InferRequest) -> InferResponse:
+    results = [_infer_single(image_url=url) for url in payload.image_urls]
+    return _aggregate_results(results)
