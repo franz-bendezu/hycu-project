@@ -1,0 +1,12 @@
+# Node dependencies and build outputs
+node_modules/
+dist/
+.vite/
+coverage/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Local environment files
+.env
+*.env
