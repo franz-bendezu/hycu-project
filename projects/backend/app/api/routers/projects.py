@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime
 import io
 import json
 import uuid
@@ -16,7 +17,12 @@ from app.infrastructure.gateways.inference_gateway import (
     get_inference_gateway,
 )
 from app.domain.services import ModelGenerator
-from app.infrastructure.persistence.models import Job as JobModel, Project, ProjectAsset
+from app.infrastructure.persistence.models import (
+    Job as JobModel,
+    JobAssetResult,
+    Project,
+    ProjectAsset,
+)
 from app.presentation.schemas.project_design import ProductSpec, ProjectModel
 from app.presentation.schemas.projects import (
     CreateProjectAssetResponse,
@@ -26,6 +32,7 @@ from app.presentation.schemas.projects import (
     CreateProjectResponse,
     ProjectAssetResponse,
     ProjectAssetsResponse,
+    ProjectJobsResponse,
     ProjectResponse,
     ProjectSummary,
     ProjectsListResponse,
@@ -50,11 +57,58 @@ def _shelf_count_from_detected_type(detected_type: str | None, fallback: int = 3
     return fallback
 
 
+def _component_quantity(result: dict, component_name: str) -> int:
+    components = result.get("components")
+    if not isinstance(components, list):
+        return 0
+
+    total = 0
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        name = str(component.get("name", "")).strip().lower()
+        if name != component_name:
+            continue
+        try:
+            qty = int(component.get("quantity", 0))
+        except (TypeError, ValueError):
+            qty = 0
+        total += max(qty, 0)
+    return total
+
+
+def _inferred_type_from_components(result: dict) -> str | None:
+    components = result.get("components")
+    if not isinstance(components, list):
+        return None
+
+    names = {
+        str(component.get("name", "")).strip().lower()
+        for component in components
+        if isinstance(component, dict)
+    }
+
+    if "desktop" in names or "front_apron" in names:
+        return "desk"
+    if "door_panel" in names:
+        return "cabinet"
+    if "shelf_panel" in names:
+        return "shelf"
+    return None
+
+
 def _inferred_type_from_detected_type(detected_type: str | None, fallback: str = "cabinet") -> str:
     normalized = (detected_type or "").strip().lower()
     if normalized in {"cabinet", "desk", "shelf"}:
         return normalized
     return fallback
+
+
+def _shelf_count_from_inference(result: dict, inferred_type: str, fallback: int = 3) -> int:
+    shelf_qty = _component_quantity(result, "shelf_panel")
+    if shelf_qty > 0:
+        return shelf_qty
+    return _shelf_count_from_detected_type(inferred_type, fallback=fallback)
 
 
 def _content_disposition(file_name: str) -> dict[str, str]:
@@ -398,14 +452,16 @@ def create_project(
 
         result = json.loads(job.result_json or "{}")
         default_name = payload.name or job.project_name or default_name
-        inferred_type = _inferred_type_from_detected_type(result.get("detected_type"))
+        inferred_type = _inferred_type_from_components(result) or _inferred_type_from_detected_type(
+            result.get("detected_type")
+        )
         spec = ProductSpec(
             name=default_name,
             inferred_type=inferred_type,
             target_width=result["suggested_width"],
             target_height=result["suggested_height"],
             target_depth=result["suggested_depth"],
-            shelf_count=_shelf_count_from_detected_type(inferred_type, fallback=3),
+            shelf_count=_shelf_count_from_inference(result, inferred_type, fallback=3),
         )
     else:
         spec = ProductSpec(name=default_name)
@@ -420,7 +476,11 @@ def create_project(
     db.add(project)
     db.commit()
 
-    return CreateProjectResponse(project_id=project_id, model=model)
+    return CreateProjectResponse(
+        project_id=project_id,
+        model=model,
+        validation=ValidateResponse(valid=report.valid, errors=report.errors, warnings=report.warnings),
+    )
 
 
 @router.post("/{project_id}/assets", response_model=CreateProjectAssetResponse)
@@ -466,7 +526,11 @@ def list_project_assets(
     project_id: str, db: Session = Depends(get_db)
 ) -> ProjectAssetsResponse:
     _get_project_or_404(project_id, db)
-    assets = db.query(ProjectAsset).filter(ProjectAsset.project_id == project_id).all()
+    assets = (
+        db.query(ProjectAsset)
+        .filter(ProjectAsset.project_id == project_id, ProjectAsset.deleted_at.is_(None))
+        .all()
+    )
     return ProjectAssetsResponse(
         project_id=project_id,
         assets=[
@@ -475,10 +539,23 @@ def list_project_assets(
                 file_name=a.file_name,
                 content_type=a.content_type,
                 size_bytes=a.size_bytes,
+                image_url=a.image_data,
             )
             for a in assets
         ],
     )
+
+
+@router.delete("/{project_id}/assets/{asset_id}", status_code=204)
+def delete_project_asset(project_id: str, asset_id: str, db: Session = Depends(get_db)) -> Response:
+    _get_project_or_404(project_id, db)
+    asset = db.get(ProjectAsset, asset_id)
+    if not asset or asset.project_id != project_id or asset.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Project asset not found")
+
+    asset.deleted_at = datetime.datetime.now(datetime.UTC)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.post("/{project_id}/jobs", response_model=CreateProjectJobResponse)
@@ -488,14 +565,23 @@ def create_project_job(
     db: Session = Depends(get_db),
 ) -> CreateProjectJobResponse:
     project = _get_project_or_404(project_id, db)
-    asset = db.get(ProjectAsset, payload.asset_id)
-    if not asset or asset.project_id != project_id:
-        raise HTTPException(status_code=404, detail="Project asset not found")
+    _ = payload
+    assets = (
+        db.query(ProjectAsset)
+        .filter(ProjectAsset.project_id == project_id, ProjectAsset.deleted_at.is_(None))
+        .all()
+    )
+    if not assets:
+        raise HTTPException(status_code=404, detail="Project has no assets")
+
+    image_data_list = [asset.image_data for asset in assets]
 
     try:
-        job_id, result = client.submit(asset.image_data)
+        job_id, result = client.submit(image_data_list)
     except InferenceGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    result["source_asset_ids"] = [asset.id for asset in assets]
 
     job = JobModel(
         id=job_id,
@@ -503,12 +589,30 @@ def create_project_job(
         result_json=json.dumps(result),
         project_name=project.name,
         project_id=project_id,
-        asset_id=payload.asset_id,
+        asset_id=None,
     )
     db.add(job)
 
+    asset_ids = result.get("source_asset_ids")
+    image_results = result.get("image_results")
+    if isinstance(asset_ids, list) and isinstance(image_results, list):
+        pair_count = min(len(asset_ids), len(image_results))
+        for idx in range(pair_count):
+            asset_id = asset_ids[idx]
+            image_result = image_results[idx]
+            if not isinstance(asset_id, str) or not isinstance(image_result, dict):
+                continue
+            db.add(
+                JobAssetResult(
+                    job_id=job_id,
+                    asset_id=asset_id,
+                    status="complete",
+                    result_json=json.dumps(image_result),
+                )
+            )
+
     current_model = ProjectModel.model_validate_json(project.model_json)
-    inferred_type = _inferred_type_from_detected_type(
+    inferred_type = _inferred_type_from_components(result) or _inferred_type_from_detected_type(
         result.get("detected_type"),
         fallback=current_model.product.inferred_type,
     )
@@ -518,20 +622,52 @@ def create_project_job(
         target_width=result["suggested_width"],
         target_height=result["suggested_height"],
         target_depth=result["suggested_depth"],
-        shelf_count=_shelf_count_from_detected_type(
+        shelf_count=_shelf_count_from_inference(
+            result,
             inferred_type,
             fallback=current_model.product.shelf_count,
         ),
     )
     updated_model = generator.generate(spec)
+    report = generator.validate(updated_model)
+    if not report.valid:
+        raise HTTPException(status_code=422, detail="Generated model failed validation")
     project.model_json = updated_model.model_dump_json()
     db.commit()
 
     return CreateProjectJobResponse(
         project_id=project_id,
-        asset_id=payload.asset_id,
+        asset_id=None,
+        asset_count=len(assets),
         job_id=job_id,
         status="complete",
+        validation=ValidateResponse(valid=report.valid, errors=report.errors, warnings=report.warnings),
+    )
+
+
+@router.get("/{project_id}/jobs", response_model=ProjectJobsResponse)
+def list_project_jobs(project_id: str, db: Session = Depends(get_db)) -> ProjectJobsResponse:
+    _get_project_or_404(project_id, db)
+
+    jobs = (
+        db.query(JobModel)
+        .filter(JobModel.project_id == project_id)
+        .order_by(JobModel.id.desc())
+        .all()
+    )
+
+    return ProjectJobsResponse(
+        project_id=project_id,
+        jobs=[
+            JobResponse(
+                job_id=job.id,
+                status=job.status,
+                result=json.loads(job.result_json) if job.result_json else None,
+                project_id=job.project_id,
+                asset_id=job.asset_id,
+            )
+            for job in jobs
+        ],
     )
 
 
@@ -545,12 +681,29 @@ def get_project_job(
         raise HTTPException(status_code=404, detail="Project job not found")
 
     result = json.loads(job.result_json) if job.result_json else None
+    asset_results_rows = (
+        db.query(JobAssetResult)
+        .filter(JobAssetResult.job_id == job_id)
+        .order_by(JobAssetResult.asset_id.asc())
+        .all()
+    )
     return JobResponse(
         job_id=job_id,
         status=job.status,
         result=result,
         project_id=job.project_id,
         asset_id=job.asset_id,
+        asset_results=[
+            {
+                "job_id": row.job_id,
+                "asset_id": row.asset_id,
+                "status": row.status,
+                "result": json.loads(row.result_json) if row.result_json else None,
+            }
+            for row in asset_results_rows
+        ]
+        if asset_results_rows
+        else None,
     )
 
 
@@ -558,7 +711,12 @@ def get_project_job(
 def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectResponse:
     project = _get_project_or_404(project_id, db)
     model = ProjectModel.model_validate_json(project.model_json)
-    return ProjectResponse(project_id=project_id, model=model)
+    report = generator.validate(model)
+    return ProjectResponse(
+        project_id=project_id,
+        model=model,
+        validation=ValidateResponse(valid=report.valid, errors=report.errors, warnings=report.warnings),
+    )
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
@@ -578,7 +736,11 @@ def update_project(
     project.model_json = updated.model_dump_json()
     db.commit()
 
-    return ProjectResponse(project_id=project_id, model=updated)
+    return ProjectResponse(
+        project_id=project_id,
+        model=updated,
+        validation=ValidateResponse(valid=report.valid, errors=report.errors, warnings=report.warnings),
+    )
 
 
 @router.post("/{project_id}/validate", response_model=ValidateResponse)

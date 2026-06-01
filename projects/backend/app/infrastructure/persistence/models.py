@@ -15,7 +15,7 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     model_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, default=datetime.datetime.utcnow
+        DateTime, default=lambda: datetime.datetime.now(datetime.UTC)
     )
 
 
@@ -30,6 +30,7 @@ class ProjectAsset(Base):
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     image_data: Mapped[str] = mapped_column(Text, nullable=False)
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Job(Base):
@@ -45,3 +46,16 @@ class Job(Base):
     asset_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("project_assets.id", ondelete="SET NULL"), nullable=True
     )
+
+
+class JobAssetResult(Base):
+    __tablename__ = "job_asset_results"
+
+    job_id: Mapped[str] = mapped_column(
+        String, ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String, ForeignKey("project_assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, default="complete")
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)

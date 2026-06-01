@@ -16,6 +16,7 @@ class CreateProjectRequest(BaseModel):
 class CreateProjectResponse(BaseModel):
     project_id: str
     model: ProjectModel
+    validation: ValidateResponse
 
 
 class CreateProjectAssetResponse(BaseModel):
@@ -30,6 +31,7 @@ class ProjectAssetResponse(BaseModel):
     file_name: str
     content_type: str
     size_bytes: int
+    image_url: str | None = None
 
 
 class ProjectAssetsResponse(BaseModel):
@@ -43,14 +45,16 @@ class ProjectJobsResponse(BaseModel):
 
 
 class CreateProjectJobRequest(BaseModel):
-    asset_id: str
+    pass
 
 
 class CreateProjectJobResponse(BaseModel):
     project_id: str
-    asset_id: str
+    asset_id: str | None = None
+    asset_count: int = Field(..., ge=1)
     job_id: str
     status: Literal["queued", "complete", "failed"]
+    validation: ValidateResponse
 
 
 class UpdateProjectRequest(BaseModel):
@@ -70,6 +74,7 @@ class ValidateResponse(BaseModel):
 class ProjectResponse(BaseModel):
     project_id: str
     model: ProjectModel
+    validation: ValidateResponse
 
 
 class ProjectSummary(BaseModel):
