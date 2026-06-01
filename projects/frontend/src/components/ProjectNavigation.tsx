@@ -50,13 +50,19 @@ export function ProjectNavigation(): React.JSX.Element | null {
           to={`/projects/${projectKey}/workspace`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Workspace
+          Analysis
         </NavLink>
         <NavLink
-          to={`/projects/${projectKey}/proposal-coverage`}
+          to={`/projects/${projectKey}/jobs`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Diagram Coverage
+          Jobs
+        </NavLink>
+        <NavLink
+          to={`/projects/${projectKey}/model`}
+          className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
+        >
+          Model
         </NavLink>
         <NavLink
           to={`/projects/${projectKey}/fabrication-output`}

@@ -20,7 +20,7 @@ function statusTone(status: "idle" | "analyzing" | "complete" | "failed"): "neut
 
 export function ProjectStatusView(): React.JSX.Element {
   const { projectKey = "" } = useParams();
-  const { getProjectByKey, selectProject } = useVisionWorkflow();
+  const { getProjectByKey, selectProject, validation, onValidateProject, activeAction, projectId } = useVisionWorkflow();
 
   useEffect(() => {
     if (projectKey) {
@@ -64,6 +64,33 @@ export function ProjectStatusView(): React.JSX.Element {
             Backend Project ID: <strong>{project.backendProjectId || "-"}</strong>
           </p>
           {project.lastError ? <p style={{ color: "#9f1f1f", margin: 0 }}>Last error: {project.lastError}</p> : null}
+
+          <div style={{ marginTop: "0.35rem", display: "grid", gap: "0.45rem" }}>
+            <p style={{ margin: 0 }}>
+              <strong>Validation status</strong>
+            </p>
+            {validation ? (
+              <>
+                <StatusPill
+                  label={validation.valid ? "Validation PASS" : "Validation FAIL"}
+                  tone={validation.valid ? "ok" : "error"}
+                />
+                <p style={{ margin: 0 }}>
+                  Errors: <strong>{validation.errors.length}</strong> | Warnings: <strong>{validation.warnings.length}</strong>
+                </p>
+              </>
+            ) : (
+              <p style={{ margin: 0, opacity: 0.8 }}>Validation snapshot unavailable.</p>
+            )}
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void onValidateProject()}
+              disabled={!projectId || activeAction === "Refreshing project status..."}
+            >
+              Recheck validation
+            </button>
+          </div>
 
           <div style={{ display: "flex", gap: "0.55rem", flexWrap: "wrap" }}>
             <Link to={`/projects/${project.key}/workspace`} className="button">

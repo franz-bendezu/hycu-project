@@ -7,9 +7,10 @@ import { WorkflowProvider } from "./hooks/useVisionWorkflow";
 import { useVisionWorkflow } from "./hooks/useVisionWorkflow";
 import { FabricationOutputView } from "./views/FabricationOutputView";
 import { HomeView } from "./views/HomeView";
+import { JobsView } from "./views/JobsView";
+import { ModelView } from "./views/ModelView";
 import { NotFoundView } from "./views/NotFoundView";
 import { ProjectStatusView } from "./views/ProjectStatusView";
-import { ProposalCoverageView } from "./views/ProposalCoverageView";
 import { WorkspaceView } from "./views/WorkspaceView";
 
 function ProjectScope(): React.JSX.Element {
@@ -20,7 +21,7 @@ function ProjectScope(): React.JSX.Element {
     if (projectKey) {
       selectProject(projectKey);
     }
-  }, [projectKey, selectProject]);
+  }, [projectKey]);
 
   return (
     <>
@@ -39,7 +40,8 @@ export function App(): React.JSX.Element {
           <Route path="/projects/:projectKey" element={<ProjectScope />}>
             <Route index element={<ProjectStatusView />} />
             <Route path="workspace" element={<WorkspaceView />} />
-            <Route path="proposal-coverage" element={<ProposalCoverageView />} />
+            <Route path="jobs" element={<JobsView />} />
+            <Route path="model" element={<ModelView />} />
             <Route path="fabrication-output" element={<FabricationOutputView />} />
           </Route>
           <Route path="*" element={<NotFoundView />} />

@@ -15,13 +15,37 @@ export type InferenceOutput = {
   suggested_width: number;
   suggested_height: number;
   suggested_depth: number;
+  components?: Array<{ name: string; kind: string; quantity: number }>;
   image_url: string;
+  images_analyzed?: number;
+  image_results?: Array<{
+    detected_type: string;
+    confidence: number;
+    suggested_width: number;
+    suggested_height: number;
+    suggested_depth: number;
+    components: Array<{ name: string; kind: string; quantity: number }>;
+    image_url: string;
+  }>;
 };
 
 export type JobResponse = {
   job_id: string;
   status: "queued" | "complete" | "failed";
   result: InferenceOutput | null;
+  project_id?: string | null;
+  asset_id?: string | null;
+  asset_results?: Array<{
+    job_id: string;
+    asset_id: string;
+    status: "queued" | "complete" | "failed";
+    result: InferenceOutput["image_results"] extends Array<infer T> ? T | null : null;
+  }> | null;
+};
+
+export type ProjectJobsResponse = {
+  project_id: string;
+  jobs: JobResponse[];
 };
 
 export type ProductSpec = {
@@ -47,6 +71,7 @@ export type ProjectModel = {
 export type CreateProjectResponse = {
   project_id: string;
   model: ProjectModel;
+  validation: ValidateResponse;
 };
 
 export type CreateProjectAssetResponse = {
@@ -56,16 +81,32 @@ export type CreateProjectAssetResponse = {
   size_bytes: number;
 };
 
+export type ProjectAssetSummary = {
+  asset_id: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  image_url?: string | null;
+};
+
+export type ProjectAssetsResponse = {
+  project_id: string;
+  assets: ProjectAssetSummary[];
+};
+
 export type CreateProjectJobResponse = {
   project_id: string;
-  asset_id: string;
+  asset_id?: string | null;
+  asset_count: number;
   job_id: string;
   status: "queued" | "complete" | "failed";
+  validation: ValidateResponse;
 };
 
 export type ProjectResponse = {
   project_id: string;
   model: ProjectModel;
+  validation: ValidateResponse;
 };
 
 export type ProjectSummary = {
@@ -146,22 +187,27 @@ export async function healthCheck(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health");
 }
 
-export async function analyzeImage(imageUrl: string): Promise<AnalyzeResponse> {
+export async function analyzeImages(imageUrls: string[]): Promise<AnalyzeResponse> {
   return requestJson<AnalyzeResponse>("/api/v1/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image_url: imageUrl }),
+    body: JSON.stringify({ image_urls: imageUrls }),
   });
 }
 
-export async function analyzeImageFile(file: File, projectName?: string): Promise<AnalyzeResponse> {
+export async function analyzeImageFilesBatch(
+  files: File[],
+  projectName?: string
+): Promise<AnalyzeResponse> {
   const form = new FormData();
-  form.append("file", file);
+  for (const file of files) {
+    form.append("files", file);
+  }
   if (projectName?.trim()) {
     form.append("project_name", projectName.trim());
   }
 
-  return requestJson<AnalyzeResponse>("/api/v1/analyze-upload", {
+  return requestJson<AnalyzeResponse>("/api/v1/analyze-upload-batch", {
     method: "POST",
     body: form,
   });
@@ -188,15 +234,37 @@ export async function uploadProjectAsset(projectId: string, file: File): Promise
   });
 }
 
+export async function listProjectAssets(projectId: string): Promise<ProjectAssetsResponse> {
+  return requestJson<ProjectAssetsResponse>(`/api/v1/projects/${projectId}/assets`);
+}
+
+export async function deleteProjectAsset(projectId: string, assetId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/v1/projects/${projectId}/assets/${assetId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const payload = (await response.json()) as ApiErrorResponse;
+      throw new Error(payload.error?.message || `Request failed with status ${response.status}`);
+    }
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+}
+
 export async function createProjectAnalysisJob(
-  projectId: string,
-  assetId: string
+  projectId: string
 ): Promise<CreateProjectJobResponse> {
   return requestJson<CreateProjectJobResponse>(`/api/v1/projects/${projectId}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ asset_id: assetId }),
+    body: JSON.stringify({}),
   });
+}
+
+export async function listProjectJobs(projectId: string): Promise<ProjectJobsResponse> {
+  return requestJson<ProjectJobsResponse>(`/api/v1/projects/${projectId}/jobs`);
 }
 
 export async function getProject(projectId: string): Promise<ProjectResponse> {

@@ -9,6 +9,7 @@ export type QueuedImage = {
   file: File;
   previewUrl: string;
   status: "ready" | "analyzing" | "complete" | "failed";
+  assetId?: string;
   jobId?: string;
   message?: string;
 };
@@ -16,10 +17,9 @@ export type QueuedImage = {
 type ImageBatchUploaderProps = {
   queuedImages: QueuedImage[];
   onAddFiles: (files: File[]) => void;
-  onRemoveFile: (id: string) => void;
+  onRemoveFile: (id: string) => Promise<void>;
   onClear: () => void;
   onAnalyze: () => Promise<void>;
-  onUseAsActiveJob: (jobId: string) => void;
 };
 
 function formatBytes(bytes: number): string {
@@ -38,7 +38,6 @@ export function ImageBatchUploader({
   onRemoveFile,
   onClear,
   onAnalyze,
-  onUseAsActiveJob,
 }: ImageBatchUploaderProps): React.JSX.Element {
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -143,15 +142,8 @@ export function ImageBatchUploader({
                   }
                 />
                 {item.message ? <p className="upload-message">{item.message}</p> : null}
-                {item.jobId ? (
-                  <div style={{ marginTop: "0.4rem" }}>
-                    <button type="button" onClick={() => onUseAsActiveJob(item.jobId as string)}>
-                      Use this result for project
-                    </button>
-                  </div>
-                ) : null}
               </div>
-              <button type="button" className="secondary" onClick={() => onRemoveFile(item.id)}>
+              <button type="button" className="secondary" onClick={() => void onRemoveFile(item.id)}>
                 Remove
               </button>
             </li>

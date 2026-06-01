@@ -1,17 +1,20 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 import {
+  JobResponse as BackendJobResponse,
   ProjectAppearance,
   createProjectAnalysisJob,
   createProject,
+  deleteProjectAsset,
   getProject,
   getJob,
   healthCheck,
+  listProjectAssets,
+  listProjectJobs,
   ProductSpec,
   ProjectModel,
   uploadProjectAsset,
   updateProject,
-  validateProject,
   ValidateResponse,
 } from "../api/backend";
 import type { QueuedImage } from "../components/ImageBatchUploader";
@@ -45,9 +48,10 @@ type WorkflowContextValue = {
   createNewProject: (name: string) => string;
   selectProject: (projectKey: string) => void;
   getProjectByKey: (projectKey: string) => ProjectRecord | undefined;
+  projectJobs: BackendJobResponse[];
   queuedImages: QueuedImage[];
   addImageFiles: (files: File[]) => void;
-  removeImageFile: (id: string) => void;
+  removeImageFile: (id: string) => Promise<void>;
   clearImageQueue: () => void;
   setActiveJob: (nextJobId: string) => void;
   projectName: string;
@@ -89,6 +93,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
   const [imageUrl, setImageUrl] = useState("");
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedProjectKey, setSelectedProjectKey] = useState("");
+  const [projectJobs, setProjectJobs] = useState<BackendJobResponse[]>([]);
   const [queuedImages, setQueuedImages] = useState<QueuedImage[]>([]);
   const [projectName, setProjectName] = useState("My Cabinet");
   const [jobId, setJobId] = useState("");
@@ -138,16 +143,73 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
     return key;
   }
 
+  function refreshProjectJobs(nextProjectId: string): void {
+    listProjectJobs(nextProjectId)
+      .then((res) => {
+        setProjectJobs(res.jobs);
+      })
+      .catch(() => {
+        setProjectJobs([]);
+      });
+  }
+
   function selectProject(projectKey: string): void {
+    function loadProjectAssets(nextProjectId: string): void {
+      listProjectAssets(nextProjectId)
+        .then((res) => {
+          setQueuedImages((prev) => {
+            prev.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+            return res.assets
+              .filter((asset) => Boolean(asset.image_url))
+              .map((asset) => ({
+                id: `asset-${asset.asset_id}`,
+                name: asset.file_name,
+                size: asset.size_bytes,
+                file: new File([], asset.file_name, { type: asset.content_type }),
+                previewUrl: asset.image_url as string,
+                status: "complete" as const,
+                assetId: asset.asset_id,
+                message: "Saved in project assets",
+              }));
+          });
+
+          const imageCount = res.assets.length;
+          setProjects((prev) =>
+            prev.map((project) =>
+              project.backendProjectId === nextProjectId || project.key === nextProjectId
+                ? {
+                    ...project,
+                    imageCount,
+                  }
+                : project
+            )
+          );
+        })
+        .catch(() => {
+          // Keep current queue state when assets cannot be loaded.
+        });
+    }
+
     // projectKey is now the backend project_id UUID
     const existingByBackendId = projects.find((p) => p.backendProjectId === projectKey);
     if (existingByBackendId) {
       setSelectedProjectKey(existingByBackendId.key);
       setProjectName(existingByBackendId.name);
       setProjectId(projectKey);
+      loadProjectAssets(projectKey);
+      refreshProjectJobs(projectKey);
       if (existingByBackendId.jobId) {
         setJobId(existingByBackendId.jobId);
       }
+      getProject(projectKey)
+        .then((res) => {
+          setProjectModel(res.model);
+          setDraftSpec(applyDraftFromModel(res.model));
+          setValidation(res.validation);
+        })
+        .catch(() => {
+          // Keep existing state if refresh fails.
+        });
       return;
     }
 
@@ -160,6 +222,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
         setProjectName(name);
         setProjectModel(res.model);
         setDraftSpec(applyDraftFromModel(res.model));
+        setValidation(res.validation);
+        loadProjectAssets(projectKey);
+        refreshProjectJobs(projectKey);
         // Insert a synthetic local record so other consumers work
         setProjects((prev) => {
           if (prev.some((p) => p.backendProjectId === projectKey)) return prev;
@@ -197,14 +262,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
   }
 
   function setActiveJob(nextJobId: string): void {
+    const selected = projectJobs.find((job) => job.job_id === nextJobId);
     setJobId(nextJobId);
-    setJobStatus("complete");
+    setJobStatus(selected?.status || "queued");
     if (selectedProjectKey) {
       updateProjectRecord(selectedProjectKey, {
         jobId: nextJobId,
-        analysisStatus: "complete",
-        analyzedCount: 1,
-        failedCount: 0,
+        analysisStatus: selected?.status === "failed" ? "failed" : "complete",
       });
     }
   }
@@ -229,7 +293,17 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
     setQueuedImages((prev) => [...prev, ...nextItems]);
   }
 
-  function removeImageFile(id: string): void {
+  async function removeImageFile(id: string): Promise<void> {
+    const target = queuedImages.find((item) => item.id === id);
+    if (target?.assetId && projectId) {
+      try {
+        await deleteProjectAsset(projectId, target.assetId);
+      } catch (e) {
+        setError((e as Error).message);
+        return;
+      }
+    }
+
     setQueuedImages((prev) => {
       const target = prev.find((item) => item.id === id);
       if (target) {
@@ -296,52 +370,41 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       lastError: undefined,
     });
 
-    let firstSuccessfulJobId = "";
-    let analyzedCount = 0;
+    let uploadedCount = 0;
     let failedCount = 0;
+    const uploadedItemIds: string[] = [];
 
     for (const item of queuedImages) {
+      if (item.assetId) {
+        uploadedCount += 1;
+        uploadedItemIds.push(item.id);
+        continue;
+      }
+
       setQueuedImages((prev) =>
         prev.map((row) =>
           row.id === item.id
             ? {
                 ...row,
                 status: "analyzing",
-                message: undefined,
+                message: "Uploading...",
               }
             : row
         )
       );
 
       try {
-        const asset = await uploadProjectAsset(projectId, item.file);
-        const createdJob = await createProjectAnalysisJob(projectId, asset.asset_id);
-        const jobResult = await getJob(createdJob.job_id);
-        const latestProject = await getProject(projectId);
-        setProjectModel(latestProject.model);
-        setDraftSpec(applyDraftFromModel(latestProject.model));
-
-        if (!firstSuccessfulJobId) {
-          firstSuccessfulJobId = createdJob.job_id;
-          setJobId(createdJob.job_id);
-          setJobStatus(jobResult.status);
-        }
-        analyzedCount += 1;
-        updateProjectRecord(projectKey, {
-          analyzedCount,
-          failedCount,
-          analysisStatus: "analyzing",
-          jobId: firstSuccessfulJobId || createdJob.job_id,
-        });
-
+        const uploadedAsset = await uploadProjectAsset(projectId, item.file);
+        uploadedCount += 1;
+        uploadedItemIds.push(item.id);
         setQueuedImages((prev) =>
           prev.map((row) =>
             row.id === item.id
               ? {
                   ...row,
-                  status: "complete",
-                  jobId: createdJob.job_id,
-                  message: "Analysis complete",
+                  assetId: uploadedAsset.asset_id,
+                  status: "analyzing",
+                  message: "Uploaded, waiting for batch job...",
                 }
               : row
           )
@@ -349,7 +412,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       } catch (e) {
         failedCount += 1;
         updateProjectRecord(projectKey, {
-          analyzedCount,
+          analyzedCount: 0,
           failedCount,
           analysisStatus: "analyzing",
           lastError: (e as Error).message,
@@ -368,20 +431,67 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       }
     }
 
-    if (!firstSuccessfulJobId) {
-      setError("All image analyses failed. Check backend availability or use image URLs.");
+    if (uploadedCount === 0) {
+      setError("No assets were uploaded. Batch analysis was not started.");
       updateProjectRecord(projectKey, {
         analysisStatus: "failed",
-        analyzedCount,
+        analyzedCount: 0,
         failedCount,
       });
-    } else {
+      setActiveAction("");
+      return;
+    }
+
+    try {
+      const createdJob = await createProjectAnalysisJob(projectId);
+      const jobResult = await getJob(createdJob.job_id);
+      const latestProject = await getProject(projectId);
+      setProjectModel(latestProject.model);
+      setDraftSpec(applyDraftFromModel(latestProject.model));
+      setValidation(latestProject.validation);
+      setJobId(createdJob.job_id);
+      setJobStatus(jobResult.status);
+
       updateProjectRecord(projectKey, {
         analysisStatus: "complete",
-        jobId: firstSuccessfulJobId,
-        analyzedCount,
+        jobId: createdJob.job_id,
+        analyzedCount: uploadedCount,
         failedCount,
       });
+      refreshProjectJobs(projectId);
+
+      setQueuedImages((prev) =>
+        prev.map((row) =>
+          uploadedItemIds.includes(row.id)
+            ? {
+                ...row,
+                status: "complete",
+                jobId: createdJob.job_id,
+                message: "Included in batch analysis",
+              }
+            : row
+        )
+      );
+    } catch (e) {
+      const message = (e as Error).message;
+      setError(message);
+      updateProjectRecord(projectKey, {
+        analysisStatus: "failed",
+        analyzedCount: 0,
+        failedCount: failedCount + uploadedCount,
+        lastError: message,
+      });
+      setQueuedImages((prev) =>
+        prev.map((row) =>
+          uploadedItemIds.includes(row.id)
+            ? {
+                ...row,
+                status: "failed",
+                message,
+              }
+            : row
+        )
+      );
     }
 
     setActiveAction("");
@@ -402,6 +512,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       setProjectId(created.project_id);
       setProjectModel(created.model);
       setDraftSpec(applyDraftFromModel(created.model));
+      setValidation(created.validation);
       if (selectedProjectKey) {
         updateProjectRecord(selectedProjectKey, {
           backendProjectId: created.project_id,
@@ -430,6 +541,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       const updated = await updateProject(projectId, draftSpec);
       setProjectModel(updated.model);
       setDraftSpec(applyDraftFromModel(updated.model));
+      setValidation(updated.validation);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -444,10 +556,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
     }
 
     setError("");
-    setActiveAction("Validating project rules...");
+    setActiveAction("Refreshing project status...");
     try {
-      const result = await validateProject(projectId);
-      setValidation(result);
+      const refreshed = await getProject(projectId);
+      setProjectModel(refreshed.model);
+      setDraftSpec(applyDraftFromModel(refreshed.model));
+      setValidation(refreshed.validation);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -465,6 +579,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       createNewProject,
       selectProject,
       getProjectByKey,
+      projectJobs,
       queuedImages,
       addImageFiles,
       removeImageFile,
@@ -496,6 +611,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }): React.J
       imageUrl,
       projects,
       selectedProjectKey,
+      projectJobs,
       queuedImages,
       projectName,
       jobId,

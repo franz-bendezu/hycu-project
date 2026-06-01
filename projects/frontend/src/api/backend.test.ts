@@ -39,7 +39,7 @@ describe("backend API client", () => {
       })
     );
 
-    await expect(createProjectAnalysisJob("p1", "a1")).rejects.toThrow("Job not found");
+    await expect(createProjectAnalysisJob("p1")).rejects.toThrow("Job not found");
   });
 
   it("uses correct methods and payloads for create-update-validate", async () => {
@@ -110,10 +110,11 @@ describe("backend API client", () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       headers: { get: () => "application/json" },
-      json: async () => ({ project_id: "p1", asset_id: "a1", job_id: "j1", status: "complete" }),
+      json: async () => ({ project_id: "p1", asset_id: null, asset_count: 1, job_id: "j1", status: "complete" }),
     });
 
-    const job = await createProjectAnalysisJob("p1", "a1");
+    const job = await createProjectAnalysisJob("p1");
     expect(job.job_id).toBe("j1");
+    expect(job.asset_count).toBe(1);
   });
 });
