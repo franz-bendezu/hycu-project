@@ -36,6 +36,23 @@ Resulting files:
 - `datasets/raw/metadata_open.csv` (image/license/source metadata)
 - `datasets/raw/metadata_open.summary.json` (collection summary)
 
+Promart catalog metadata collection (slow crawl, flat-board + wood-derived furniture only):
+
+```bash
+python data_collection/collect_promart_furniture_metadata.py \
+	--category-url https://www.promart.pe/muebles \
+	--output-csv datasets/raw/promart_flat_wood_metadata.csv \
+	--output-jsonl datasets/raw/promart_flat_wood_metadata.jsonl \
+	--page-size 24 \
+	--max-pages 60 \
+	--sleep 1.5
+```
+
+Resulting files:
+- `datasets/raw/promart_flat_wood_metadata.csv` (training-ready filtered metadata)
+- `datasets/raw/promart_flat_wood_metadata.jsonl` (raw product payloads)
+- `datasets/raw/promart_flat_wood_metadata.summary.json` (crawl summary)
+
 2. Train YOLOv11 + regression model:
 
 ```bash
