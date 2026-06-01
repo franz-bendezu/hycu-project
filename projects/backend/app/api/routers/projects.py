@@ -104,6 +104,41 @@ def _inferred_type_from_detected_type(detected_type: str | None, fallback: str =
     return fallback
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _infer_model_type(result: dict, fallback: str = "cabinet") -> str:
+    from_components = _inferred_type_from_components(result)
+    if from_components:
+        return from_components
+
+    detected = _inferred_type_from_detected_type(result.get("detected_type"), fallback=fallback)
+    confidence = _safe_float(result.get("confidence"), default=0.0)
+    if confidence >= 0.2:
+        return detected
+
+    width = _safe_float(result.get("suggested_width"), default=0.0)
+    height = _safe_float(result.get("suggested_height"), default=0.0)
+    depth = _safe_float(result.get("suggested_depth"), default=0.0)
+
+    shelf_qty = _component_quantity(result, "shelf_panel")
+    if shelf_qty >= 4:
+        return "shelf"
+
+    # When detector confidence is weak, use size proportions as a robust fallback.
+    if width > 0 and height > 0:
+        if height >= width * 1.2 and depth <= width * 0.8:
+            return "cabinet"
+        if height <= width * 0.85:
+            return "desk"
+
+    return fallback
+
+
 def _shelf_count_from_inference(result: dict, inferred_type: str, fallback: int = 3) -> int:
     shelf_qty = _component_quantity(result, "shelf_panel")
     if shelf_qty > 0:
@@ -452,9 +487,7 @@ def create_project(
 
         result = json.loads(job.result_json or "{}")
         default_name = payload.name or job.project_name or default_name
-        inferred_type = _inferred_type_from_components(result) or _inferred_type_from_detected_type(
-            result.get("detected_type")
-        )
+        inferred_type = _infer_model_type(result, fallback="cabinet")
         spec = ProductSpec(
             name=default_name,
             inferred_type=inferred_type,
@@ -612,10 +645,7 @@ def create_project_job(
             )
 
     current_model = ProjectModel.model_validate_json(project.model_json)
-    inferred_type = _inferred_type_from_components(result) or _inferred_type_from_detected_type(
-        result.get("detected_type"),
-        fallback=current_model.product.inferred_type,
-    )
+    inferred_type = _infer_model_type(result, fallback=current_model.product.inferred_type)
     spec = ProductSpec(
         name=current_model.product.name,
         inferred_type=inferred_type,

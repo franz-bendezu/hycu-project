@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import uuid
+
 from app.domain import ComponentSpec, HardwareSpec, ProductSpec, ProjectDesign
+from app.presentation.schemas.project_design import FeatureSpec, JointSpec, MaterialSpec
 from app.domain.services.rule_validator import ProjectRuleValidator, ValidationResult
 
 
@@ -9,10 +12,36 @@ class ModelGenerator:
         self.validator = ProjectRuleValidator()
 
     def generate(self, spec: ProductSpec) -> ProjectDesign:
+        if not getattr(spec, "id", None):
+            spec.id = str(uuid.uuid4())
+        if not getattr(spec, "sku", None):
+            spec.sku = f"SKU-{spec.id[:8]}"
+
+        default_material = MaterialSpec(
+            id="material_board_default",
+            thickness_mm=spec.material_thickness,
+            texture_map_url=None,
+        )
+
         components = self._build_components(spec)
+        for component in components:
+            component.material_id = default_material.id
+            component.length_formula = f"{component.height:.1f}"
+            component.width_formula = f"{component.width:.1f}"
+
+        joints = self._build_joints(spec, components)
+        features = self._build_features(joints)
         hardware = self._build_hardware(spec)
         warnings = self._generate_warnings(spec)
-        return ProjectDesign(product=spec, components=components, hardware=hardware, warnings=warnings)
+        return ProjectDesign(
+            product=spec,
+            materials=[default_material],
+            components=components,
+            hardware=hardware,
+            joints=joints,
+            features=features,
+            warnings=warnings,
+        )
 
     def validate(self, model: ProjectDesign) -> ValidationResult:
         return self.validator.validate(model)
@@ -205,21 +234,96 @@ class ModelGenerator:
         ]
 
     def _build_hardware(self, spec: ProductSpec) -> list[HardwareSpec]:
+        def _hardware(code: str, qty: int, joint_type: str) -> HardwareSpec:
+            lower = code.lower()
+            return HardwareSpec(
+                id=f"hardware_{lower}",
+                code=code,
+                qty=qty,
+                mesh_path=f"assets/hardware/{lower}.glb",
+                svg_path=f"assets/hardware/{lower}.svg",
+                joint_type=joint_type,
+            )
+
         profile = self._profile_for_spec(spec)
         if profile == "desk":
             return [
-                HardwareSpec(code="CORNER_BRACKET_40", qty=8),
-                HardwareSpec(code="WOOD_SCREW_4X40", qty=24),
+                _hardware(code="CORNER_BRACKET_40", qty=8, joint_type="bracket"),
+                _hardware(code="WOOD_SCREW_4X40", qty=24, joint_type="screw"),
             ]
         if profile == "shelf":
             return [
-                HardwareSpec(code="CAM_LOCK_15MM", qty=max(12, spec.shelf_count * 4)),
-                HardwareSpec(code="WOOD_SCREW_4X40", qty=max(20, spec.shelf_count * 8)),
+                _hardware(code="CAM_LOCK_15MM", qty=max(12, spec.shelf_count * 4), joint_type="cam_lock"),
+                _hardware(code="WOOD_SCREW_4X40", qty=max(20, spec.shelf_count * 8), joint_type="screw"),
             ]
         return [
-            HardwareSpec(code="CAM_LOCK_15MM", qty=max(8, spec.shelf_count * 4)),
-            HardwareSpec(code="WOOD_SCREW_4X40", qty=max(16, spec.shelf_count * 8)),
+            _hardware(code="CAM_LOCK_15MM", qty=max(8, spec.shelf_count * 4), joint_type="cam_lock"),
+            _hardware(code="WOOD_SCREW_4X40", qty=max(16, spec.shelf_count * 8), joint_type="screw"),
         ]
+
+    def _build_joints(self, spec: ProductSpec, components: list[ComponentSpec]) -> list[JointSpec]:
+        by_id = {component.id: component for component in components}
+        joints: list[JointSpec] = []
+
+        def add_joint(parent_id: str, child_id: str, pos_x: float, pos_y: float, pos_z: float) -> None:
+            if parent_id not in by_id or child_id not in by_id:
+                return
+            joints.append(
+                JointSpec(
+                    parent_id=parent_id,
+                    child_id=child_id,
+                    pos_x=round(pos_x, 3),
+                    pos_y=round(pos_y, 3),
+                    pos_z=round(pos_z, 3),
+                    rot_x=0.0,
+                    rot_y=0.0,
+                    rot_z=0.0,
+                )
+            )
+
+        profile = self._profile_for_spec(spec)
+        if profile == "desk":
+            leg_ids = [
+                "left_leg_front",
+                "right_leg_front",
+                "left_leg_back",
+                "right_leg_back",
+            ]
+            for leg_id in leg_ids:
+                add_joint("top", leg_id, 0.0, -spec.target_height / 2, 0.0)
+            add_joint("top", "front_apron", 0.0, -spec.target_height / 2 + 80, spec.target_depth / 2 - 18)
+            add_joint("top", "back_apron", 0.0, -spec.target_height / 2 + 80, -spec.target_depth / 2 + 18)
+            return joints
+
+        add_joint("left_side", "top", 0.0, spec.target_height / 2 - spec.material_thickness / 2, 0.0)
+        add_joint("right_side", "top", 0.0, spec.target_height / 2 - spec.material_thickness / 2, 0.0)
+        add_joint("left_side", "bottom", 0.0, -spec.target_height / 2 + spec.material_thickness / 2, 0.0)
+        add_joint("right_side", "bottom", 0.0, -spec.target_height / 2 + spec.material_thickness / 2, 0.0)
+
+        if "back_panel" in by_id:
+            add_joint("left_side", "back_panel", 0.0, 0.0, -spec.target_depth / 2 + spec.material_thickness / 2)
+            add_joint("right_side", "back_panel", 0.0, 0.0, -spec.target_depth / 2 + spec.material_thickness / 2)
+
+        shelf_ids = [component.id for component in components if component.id.startswith("shelf_")]
+        for shelf_id in shelf_ids:
+            add_joint("left_side", shelf_id, 0.0, 0.0, 0.0)
+            add_joint("right_side", shelf_id, 0.0, 0.0, 0.0)
+
+        return joints
+
+    def _build_features(self, joints: list[JointSpec]) -> list[FeatureSpec]:
+        features: list[FeatureSpec] = []
+        for index, joint in enumerate(joints):
+            features.append(
+                FeatureSpec(
+                    component_id=joint.child_id,
+                    face_index=((index % 6) + 1),
+                    u_coord=round((index % 4) * 12.5, 2),
+                    v_coord=round((index % 3) * 9.5, 2),
+                    operation_type="drill_5mm",
+                )
+            )
+        return features
 
     def _generate_warnings(self, spec: ProductSpec) -> list[str]:
         shelf_spacing = (spec.target_height - (2 * spec.material_thickness)) / max(spec.shelf_count + 1, 1)

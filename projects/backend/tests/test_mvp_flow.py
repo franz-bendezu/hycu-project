@@ -8,34 +8,38 @@ from app.api.routers import analysis, projects
 from app.main import app
 
 
+def _component(name: str, kind: str, quantity: int) -> dict:
+    return {"id": f"cmp_{name}", "name": name, "kind": kind, "quantity": quantity}
+
+
 def _components_for_type(detected_type: str) -> list[dict]:
     if detected_type == "desk":
         return [
-            {"name": "desktop", "kind": "panel", "quantity": 1},
-            {"name": "left_side_panel", "kind": "panel", "quantity": 1},
-            {"name": "right_side_panel", "kind": "panel", "quantity": 1},
-            {"name": "back_panel", "kind": "panel", "quantity": 1},
-            {"name": "front_apron", "kind": "support", "quantity": 1},
+            _component("desktop", "panel", 1),
+            _component("left_side_panel", "panel", 1),
+            _component("right_side_panel", "panel", 1),
+            _component("back_panel", "panel", 1),
+            _component("front_apron", "support", 1),
         ]
 
     if detected_type == "shelf":
         return [
-            {"name": "top_panel", "kind": "panel", "quantity": 1},
-            {"name": "bottom_panel", "kind": "panel", "quantity": 1},
-            {"name": "left_side_panel", "kind": "panel", "quantity": 1},
-            {"name": "right_side_panel", "kind": "panel", "quantity": 1},
-            {"name": "shelf_panel", "kind": "panel", "quantity": 3},
-            {"name": "back_panel", "kind": "panel", "quantity": 1},
+            _component("top_panel", "panel", 1),
+            _component("bottom_panel", "panel", 1),
+            _component("left_side_panel", "panel", 1),
+            _component("right_side_panel", "panel", 1),
+            _component("shelf_panel", "panel", 3),
+            _component("back_panel", "panel", 1),
         ]
 
     return [
-        {"name": "top_panel", "kind": "panel", "quantity": 1},
-        {"name": "bottom_panel", "kind": "panel", "quantity": 1},
-        {"name": "left_side_panel", "kind": "panel", "quantity": 1},
-        {"name": "right_side_panel", "kind": "panel", "quantity": 1},
-        {"name": "door_panel", "kind": "panel", "quantity": 2},
-        {"name": "shelf_panel", "kind": "panel", "quantity": 3},
-        {"name": "back_panel", "kind": "panel", "quantity": 1},
+        _component("top_panel", "panel", 1),
+        _component("bottom_panel", "panel", 1),
+        _component("left_side_panel", "panel", 1),
+        _component("right_side_panel", "panel", 1),
+        _component("door_panel", "panel", 2),
+        _component("shelf_panel", "panel", 3),
+        _component("back_panel", "panel", 1),
     ]
 
 

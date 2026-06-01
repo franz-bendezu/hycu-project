@@ -73,6 +73,17 @@ class HttpInferenceGateway:
             "image_url": payload["image_url"],
         }
 
+        passthrough_fields = (
+            "interior",
+            "door",
+            "uncertainty",
+            "joints",
+            "hardware",
+        )
+        for field in passthrough_fields:
+            if field in payload:
+                normalized[field] = payload[field]
+
         image_results = payload.get("image_results")
         if image_results is not None and not isinstance(image_results, list):
             raise InferenceGatewayError("Inference service payload field 'image_results' must be a list when present")
