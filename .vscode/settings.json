@@ -1,7 +1,16 @@
 {
+    "python.defaultInterpreterPath": "/workspaces/hycu-project/.venv/bin/python",
+    "python.analysis.extraPaths": [
+        "/workspaces/hycu-project/.venv/lib/python3.12/site-packages"
+    ],
     "python-envs.pythonProjects": [
         {
             "path": "projects/backend",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        },
+        {
+            "path": "projects/inference",
             "envManager": "ms-python.python:venv",
             "packageManager": "ms-python.python:pip"
         }

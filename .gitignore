@@ -16,6 +16,13 @@ projects/frontend/dist/
 *.sqlite
 *.sqlite3
 
+# Generated model artifacts
+yolo11n.pt
+projects/inference/models/
+projects/training/models/export/
+*.onnx
+*.pt
+
 # OS
 .DS_Store
 Thumbs.db
