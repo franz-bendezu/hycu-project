@@ -1,0 +1,13 @@
+[
+  {"category": "shelf", "query": "filetype:bitmap bookshelf"},
+  {"category": "shelf", "query": "filetype:bitmap shelf furniture"},
+  {"category": "shelf", "query": "filetype:bitmap wooden shelf"},
+  {"category": "shelf", "query": "filetype:bitmap wall shelf"},
+  {"category": "shelf", "query": "filetype:bitmap bookcase"},
+
+  {"category": "desk", "query": "filetype:bitmap desk"},
+  {"category": "desk", "query": "filetype:bitmap writing desk"},
+  {"category": "desk", "query": "filetype:bitmap office desk"},
+  {"category": "desk", "query": "filetype:bitmap school desk"},
+  {"category": "desk", "query": "filetype:bitmap computer desk furniture"}
+]

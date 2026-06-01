@@ -1,0 +1,14 @@
+[
+  {
+    "category": "cabinet",
+    "query": "filetype:bitmap furniture cabinet"
+  },
+  {
+    "category": "shelf",
+    "query": "filetype:bitmap wooden shelf furniture"
+  },
+  {
+    "category": "desk",
+    "query": "filetype:bitmap desk furniture"
+  }
+]

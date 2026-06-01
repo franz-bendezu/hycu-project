@@ -1,0 +1,19 @@
+[
+  {"category": "cabinet", "query": "wood cabinet furniture"},
+  {"category": "cabinet", "query": "kitchen cabinet"},
+  {"category": "cabinet", "query": "storage cabinet interior"},
+  {"category": "cabinet", "query": "wooden wardrobe cabinet"},
+  {"category": "cabinet", "query": "display cabinet"},
+
+  {"category": "shelf", "query": "wood shelf furniture"},
+  {"category": "shelf", "query": "bookshelf furniture"},
+  {"category": "shelf", "query": "wall shelf wood"},
+  {"category": "shelf", "query": "open shelf cabinet"},
+  {"category": "shelf", "query": "bookcase shelf"},
+
+  {"category": "desk", "query": "wood desk furniture"},
+  {"category": "desk", "query": "office desk"},
+  {"category": "desk", "query": "study desk"},
+  {"category": "desk", "query": "computer desk"},
+  {"category": "desk", "query": "writing desk furniture"}
+]

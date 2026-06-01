@@ -1,0 +1,15 @@
+[
+  {
+    "category": "cabinet",
+    "product_urls": [
+      "https://example.com/product-1",
+      "https://example.com/product-2"
+    ]
+  },
+  {
+    "category": "shelf",
+    "product_urls": [
+      "https://example.com/product-3"
+    ]
+  }
+]
