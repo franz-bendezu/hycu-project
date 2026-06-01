@@ -9,13 +9,79 @@ export type AnalyzeResponse = {
   status: "queued" | "complete" | "failed";
 };
 
+export enum InferenceComponentKind {
+  PANEL = "panel",
+  SUPPORT = "support",
+  HARDWARE = "hardware",
+  ASSEMBLY = "assembly",
+}
+
+export enum InferenceDoorType {
+  HINGED = "hinged",
+  SLIDING = "sliding",
+  UNKNOWN = "unknown",
+}
+
+export enum InferenceJointType {
+  CAM_LOCK = "cam_lock",
+  SHELF_PIN = "shelf_pin",
+  SCREW = "screw",
+  HINGE = "hinge",
+  SLIDING_TRACK = "sliding_track",
+  TELESCOPIC_SLIDE = "telescopic_slide",
+  BRACKET = "bracket",
+}
+
+export enum InferenceInteriorVisibility {
+  INTERIOR_NOT_VISIBLE = "interior_not_visible",
+  INTERIOR_PARTIALLY_VISIBLE = "interior_partially_visible",
+  INTERIOR_FULLY_VISIBLE = "interior_fully_visible",
+}
+
+export enum InferenceHardwareCode {
+  CAM_LOCK_15MM = "CAM_LOCK_15MM",
+  SHELF_PIN_5MM = "SHELF_PIN_5MM",
+  HINGE_SOFT_CLOSE_110 = "HINGE_SOFT_CLOSE_110",
+  WOOD_SCREW_4X16 = "WOOD_SCREW_4X16",
+  SLIDING_DOOR_TRACK_SET = "SLIDING_DOOR_TRACK_SET",
+  TELESCOPIC_SLIDE_400 = "TELESCOPIC_SLIDE_400",
+  WOOD_SCREW_4X40 = "WOOD_SCREW_4X40",
+  CORNER_BRACKET_40 = "CORNER_BRACKET_40",
+  HARDWARE_REVIEW_REQUIRED = "HARDWARE_REVIEW_REQUIRED",
+}
+
 export type InferenceOutput = {
   detected_type: string;
   confidence: number;
   suggested_width: number;
   suggested_height: number;
   suggested_depth: number;
-  components?: Array<{ name: string; kind: string; quantity: number }>;
+  components?: Array<{ id: string; name: string; kind: InferenceComponentKind; quantity: number }>;
+  component_index?: Record<string, { id: string; name: string; kind: InferenceComponentKind; quantity: number }>;
+  interior?: {
+    visibility: InferenceInteriorVisibility;
+    coverage_ratio: number;
+    unknown_interior: boolean;
+  };
+  door?: {
+    type: InferenceDoorType;
+    count_uncertain: boolean;
+  };
+  uncertainty?: {
+    hardware_uncertain: boolean;
+  };
+  joints?: Array<{
+    id: string;
+    parent_component_id: string;
+    child_component_id: string;
+    joint_type: InferenceJointType;
+    count: number;
+  }>;
+  hardware?: Array<{
+    code: InferenceHardwareCode;
+    qty: number;
+    reason?: string | null;
+  }>;
   image_url: string;
   images_analyzed?: number;
   image_results?: Array<{
@@ -23,8 +89,33 @@ export type InferenceOutput = {
     confidence: number;
     suggested_width: number;
     suggested_height: number;
-    suggested_depth: number;
-    components: Array<{ name: string; kind: string; quantity: number }>;
+    suggested_depth: number;  
+    components: Array<{ id: string; name: string; kind: InferenceComponentKind; quantity: number }>;
+    component_index?: Record<string, { id: string; name: string; kind: InferenceComponentKind; quantity: number }>;
+    interior?: {
+      visibility: InferenceInteriorVisibility;
+      coverage_ratio: number;
+      unknown_interior: boolean;
+    };
+    door?: {
+      type: InferenceDoorType;
+      count_uncertain: boolean;
+    };
+    uncertainty?: {
+      hardware_uncertain: boolean;
+    };
+    joints?: Array<{
+      id: string;
+      parent_component_id: string;
+      child_component_id: string;
+      joint_type: InferenceJointType;
+      count: number;
+    }>;
+    hardware?: Array<{
+      code: InferenceHardwareCode;
+      qty: number;
+      reason?: string | null;
+    }>;
     image_url: string;
   }>;
 };
@@ -49,7 +140,10 @@ export type ProjectJobsResponse = {
 };
 
 export type ProductSpec = {
+  id?: string | null;
+  sku?: string | null;
   name: string;
+  inferred_type?: "cabinet" | "desk" | "shelf";
   target_width: number;
   target_height: number;
   target_depth: number;
@@ -63,8 +157,46 @@ export type ProjectAppearance = {
 
 export type ProjectModel = {
   product: ProductSpec;
-  components: Array<{ id: string; kind: string; width: number; height: number; depth: number }>;
-  hardware: Array<{ code: string; qty: number }>;
+  materials?: Array<{
+    id: string;
+    thickness_mm: number;
+    texture_map_url?: string | null;
+  }>;
+  components: Array<{
+    id: string;
+    kind: string;
+    material_id?: string | null;
+    length_formula?: string | null;
+    width_formula?: string | null;
+    width: number;
+    height: number;
+    depth: number;
+  }>;
+  hardware: Array<{
+    id?: string | null;
+    code: string;
+    qty: number;
+    mesh_path?: string | null;
+    svg_path?: string | null;
+    joint_type?: string | null;
+  }>;
+  joints?: Array<{
+    parent_id: string;
+    child_id: string;
+    pos_x: number;
+    pos_y: number;
+    pos_z: number;
+    rot_x: number;
+    rot_y: number;
+    rot_z: number;
+  }>;
+  features?: Array<{
+    component_id: string;
+    face_index: number;
+    u_coord: number;
+    v_coord: number;
+    operation_type: string;
+  }>;
   warnings: string[];
 };
 
