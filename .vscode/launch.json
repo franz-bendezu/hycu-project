@@ -1,0 +1,54 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend: uvicorn (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"],
+      "cwd": "${workspaceFolder}/projects/backend",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/projects/backend",
+        "INFERENCE_MODE": "service",
+        "INFERENCE_SERVICE_URL": "http://127.0.0.1:8001"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Inference: uvicorn (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["main:app", "--reload", "--host", "127.0.0.1", "--port", "8001"],
+      "cwd": "${workspaceFolder}/projects/inference/app",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/projects/inference/app"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Frontend: vite dev",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "${workspaceFolder}/projects/frontend",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "All services",
+      "configurations": ["Backend: uvicorn (debug)", "Inference: uvicorn (debug)", "Frontend: vite dev"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "All services",
+      "configurations": ["Backend: uvicorn (debug)", "Inference: uvicorn (debug)", "Frontend: vite dev"],
+      "stopAll": true
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - ..:/workspaces/hycu-project:cached
+    command: sleep infinity
+    depends_on:
+      - inference
+      - postgres
+      - redis
+
+  inference:
+    build:
+      context: ../projects/inference
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hycu
+      POSTGRES_PASSWORD: hycu
+      POSTGRES_DB: vision_blueprint
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres-data:
