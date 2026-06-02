@@ -113,6 +113,7 @@ def health() -> dict:
         "model_path": str(detector.model_path),
         "labels": list(detector.labels),
         "confidence_threshold": detector.score_threshold,
+        "active_providers": detector.active_providers,
     }
 
 

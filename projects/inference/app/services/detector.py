@@ -7,7 +7,7 @@ import onnxruntime as ort  # type: ignore[import-not-found]
 from fastapi import HTTPException
 from PIL import Image
 
-from app.core.config import get_image_size_fallback
+from app.core.config import get_image_size_fallback, get_execution_providers
 from app.utils.image import preprocess
 
 class YoloDetector:
@@ -16,7 +16,8 @@ class YoloDetector:
             raise RuntimeError(f"YOLO model not found at {model_path}")
 
         try:
-            self._session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+            providers = get_execution_providers()
+            self._session = ort.InferenceSession(str(model_path), providers=providers)
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to load YOLO model from {model_path}: {exc}") from exc
 
@@ -30,6 +31,7 @@ class YoloDetector:
         self.labels = labels
         self.model_path = model_path
         self.score_threshold = score_threshold
+        self.active_providers = self._session.get_providers()
 
     def _resolve_input_size(self, shape: list[int | str | None]) -> tuple[int, int]:
         if len(shape) != 4:

@@ -57,3 +57,10 @@ def get_confidence_threshold() -> float:
 
 def get_image_size_fallback() -> int:
     return int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))
+
+def get_execution_providers() -> list[str]:
+    raw = os.getenv("INFERENCE_PROVIDERS")
+    if not raw:
+        # Default to trying CUDA then falling back to CPU
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return [p.strip() for p in raw.split(",") if p.strip()]
