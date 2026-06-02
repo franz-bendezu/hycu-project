@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Literal
+from pydantic import BaseModel, Field, model_validator
+
+class InferRequest(BaseModel):
+    image_urls: list[str] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def validate_sources(self) -> "InferRequest":
+        if len(self.image_urls) > 12:
+            raise ValueError("Maximum 12 images per request")
+        for idx, value in enumerate(self.image_urls):
+            if len(value) < 8:
+                raise ValueError(f"image_urls[{idx}] is too short")
+        return self
+
+
+class ComponentKind(StrEnum):
+    PANEL = "panel"
+    SUPPORT = "support"
+    HARDWARE = "hardware"
+    ASSEMBLY = "assembly"
+
+
+class DoorType(StrEnum):
+    HINGED = "hinged"
+    SLIDING = "sliding"
+    UNKNOWN = "unknown"
+
+
+class JointType(StrEnum):
+    CAM_LOCK = "cam_lock"
+    SHELF_PIN = "shelf_pin"
+    SCREW = "screw"
+    HINGE = "hinge"
+    SLIDING_TRACK = "sliding_track"
+    TELESCOPIC_SLIDE = "telescopic_slide"
+    BRACKET = "bracket"
+
+
+class InteriorVisibility(StrEnum):
+    INTERIOR_NOT_VISIBLE = "interior_not_visible"
+    INTERIOR_PARTIALLY_VISIBLE = "interior_partially_visible"
+    INTERIOR_FULLY_VISIBLE = "interior_fully_visible"
+
+
+class HardwareCode(StrEnum):
+    CAM_LOCK_15MM = "CAM_LOCK_15MM"
+    SHELF_PIN_5MM = "SHELF_PIN_5MM"
+    HINGE_SOFT_CLOSE_110 = "HINGE_SOFT_CLOSE_110"
+    WOOD_SCREW_4X16 = "WOOD_SCREW_4X16"
+    SLIDING_DOOR_TRACK_SET = "SLIDING_DOOR_TRACK_SET"
+    TELESCOPIC_SLIDE_400 = "TELESCOPIC_SLIDE_400"
+    WOOD_SCREW_4X40 = "WOOD_SCREW_4X40"
+    CORNER_BRACKET_40 = "CORNER_BRACKET_40"
+    HARDWARE_REVIEW_REQUIRED = "HARDWARE_REVIEW_REQUIRED"
+
+
+class Component(BaseModel):
+    id: str
+    name: str
+    kind: ComponentKind
+    quantity: int = Field(..., ge=1)
+
+
+class InteriorAssessment(BaseModel):
+    visibility: InteriorVisibility
+    coverage_ratio: float = Field(..., ge=0.0, le=1.0)
+    unknown_interior: bool
+
+
+class DoorAssessment(BaseModel):
+    type: DoorType
+    count_uncertain: bool
+
+
+class UncertaintyAssessment(BaseModel):
+    hardware_uncertain: bool
+
+
+class JointEvidence(BaseModel):
+    id: str
+    parent_component_id: str
+    child_component_id: str
+    joint_type: JointType
+    count: int = Field(..., ge=1)
+
+
+class HardwareRecommendation(BaseModel):
+    code: HardwareCode
+    qty: int = Field(..., ge=1)
+    reason: str | None = None
+
+
+class InferImageResult(BaseModel):
+    detected_type: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    suggested_width: float = Field(..., gt=0)
+    suggested_height: float = Field(..., gt=0)
+    suggested_depth: float = Field(..., gt=0)
+    components: list[Component]
+    component_index: dict[str, Component]
+    interior: InteriorAssessment
+    door: DoorAssessment
+    uncertainty: UncertaintyAssessment
+    joints: list[JointEvidence]
+    hardware: list[HardwareRecommendation]
+    image_url: str = Field(..., min_length=8)
+
+
+class InferResponse(BaseModel):
+    detected_type: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    suggested_width: float = Field(..., gt=0)
+    suggested_height: float = Field(..., gt=0)
+    suggested_depth: float = Field(..., gt=0)
+    components: list[Component]
+    component_index: dict[str, Component]
+    interior: InteriorAssessment
+    door: DoorAssessment
+    uncertainty: UncertaintyAssessment
+    joints: list[JointEvidence]
+    hardware: list[HardwareRecommendation]
+    image_url: str = Field(..., min_length=8)
+    images_analyzed: int = Field(default=1, ge=1)
+    image_results: list[InferImageResult]
