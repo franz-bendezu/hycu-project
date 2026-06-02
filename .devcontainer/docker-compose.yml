@@ -8,19 +8,14 @@ services:
       - seccomp:unconfined
     volumes:
       - ..:/workspaces/hycu-project:cached
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     command: sleep infinity
     depends_on:
-      - inference
       - postgres
       - redis
-
-  inference:
-    build:
-      context: ../projects/inference
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "9000:9000"
 
   postgres:
     image: postgres:16

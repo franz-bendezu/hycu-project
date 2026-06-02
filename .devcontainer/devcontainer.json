@@ -2,7 +2,7 @@
   "name": "vision-to-blueprint-dev",
   "dockerComposeFile": "docker-compose.yml",
   "service": "dev",
-  "runServices": ["dev", "inference", "postgres", "redis"],
+  "runServices": ["dev", "postgres", "redis"],
   "workspaceFolder": "/workspaces/hycu-project",
   "shutdownAction": "stopCompose",
   "customizations": {
