@@ -1,0 +1,33 @@
+prepare_dataset: true
+prepare_class_profile: components
+prepare_clean: false
+validate_dataset: true
+
+dataset_yaml: datasets/yolo_dataset_components.yaml
+yolo_model: yolo11n.pt
+epochs: 50
+imgsz: 640
+batch: 16
+patience: 20
+workers: 0
+
+project_dir: runs/train
+experiment: furniture_components_production
+regression_csv: null
+regression_out_dir: models/regression
+
+export_out_dir: models/export
+deploy_to_inference: true
+inference_models_dir: ../inference/models
+
+val_ratio: 0.2
+mode: copy
+
+production_mode: true
+min_train_images: 120
+min_val_images: 24
+max_class_imbalance_ratio: 3.0
+min_map50: 0.30
+min_map50_95: 0.20
+min_precision: 0.09
+min_recall: 0.30

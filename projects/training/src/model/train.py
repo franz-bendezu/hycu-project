@@ -12,6 +12,9 @@ from sklearn.multioutput import MultiOutputRegressor
 from ultralytics import YOLO
 
 
+TRAINING_ROOT = Path(__file__).resolve().parents[2]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train YOLOv11 detector and material regression model")
     parser.add_argument("--dataset-yaml", type=Path, required=True, help="Path to YOLO dataset YAML")
@@ -19,8 +22,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-model", default="yolo11n.pt", help="YOLO checkpoint name or path")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--project-dir", type=Path, default=Path("models"))
+    parser.add_argument("--batch", type=int, default=16, help="Batch size for YOLO training")
+    parser.add_argument("--patience", type=int, default=20, help="Early-stopping patience for YOLO")
+    parser.add_argument("--workers", type=int, default=8, help="Data loader workers for YOLO")
+    parser.add_argument("--project-dir", type=Path, default=TRAINING_ROOT / "runs" / "train")
+    parser.add_argument("--regression-out-dir", type=Path, default=TRAINING_ROOT / "models" / "regression")
     parser.add_argument("--experiment", default="yolo11_furniture")
+    parser.add_argument("--resume", action="store_true", help="Resume interrupted YOLO run if available")
+    parser.add_argument("--exist-ok", action="store_true", help="Allow reusing an existing experiment directory")
     return parser.parse_args()
 
 
@@ -33,8 +42,13 @@ def train_detector(args: argparse.Namespace) -> Path:
         data=str(args.dataset_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
+        batch=args.batch,
+        patience=args.patience,
+        workers=args.workers,
         project=str(args.project_dir),
         name=args.experiment,
+        exist_ok=args.exist_ok,
+        resume=args.resume,
     )
 
     run_dir = Path(result.save_dir)
@@ -72,7 +86,7 @@ def train_regression(args: argparse.Namespace) -> Path | None:
     pred = reg.predict(x)
     mae = mean_absolute_error(y, pred, multioutput="raw_values")
 
-    regression_dir = args.project_dir / "regression"
+    regression_dir = args.regression_out_dir
     regression_dir.mkdir(parents=True, exist_ok=True)
     model_path = regression_dir / "dimension_regressor.joblib"
     metrics_path = regression_dir / "metrics.json"
