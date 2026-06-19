@@ -1,8 +1,48 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+class JointRule(str, Enum):
+    OVERLAP = "overlap"
+    INSET = "inset"
+    BETWEEN = "between"
+    FLUSH_BACK = "flush_back"
+    MOUNT = "mount"
+
+
+class ComponentKind(str, Enum):
+    LEFT_SIDE = "left_side"
+    RIGHT_SIDE = "right_side"
+    TOP_PANEL = "top_panel"
+    BOTTOM_PANEL = "bottom_panel"
+    BACK_PANEL = "back_panel"
+    SHELF = "shelf"
+    DIVIDER_PANEL = "divider_panel"
+    FRONT_PANEL = "front_panel"
+    DOOR_PANEL = "door_panel"
+    DRAWER_FRONT = "drawer_front"
+    LEFT_LEG_FRONT = "left_leg_front"
+    RIGHT_LEG_FRONT = "right_leg_front"
+    LEFT_LEG_BACK = "left_leg_back"
+    RIGHT_LEG_BACK = "right_leg_back"
+
+
+class HardwareAnchor(str, Enum):
+    # Screws & Fasteners
+    WOOD_SCREW_4X40 = "WOOD_SCREW_4X40"
+
+    # Brackets
+    CORNER_BRACKET_40 = "CORNER_BRACKET_40"
+
+    # Connectors
+    CAM_LOCK_15MM = "CAM_LOCK_15MM"
+
+    # Pins & Supports
+    SHELF_PIN_5MM = "SHELF_PIN_5MM"
 
 
 class ProductSpec(BaseModel):
@@ -15,14 +55,15 @@ class ProductSpec(BaseModel):
     target_depth: float = Field(default=450, gt=0)
     material_thickness: float = Field(default=18, ge=8, le=50)
     shelf_count: int = Field(default=3, ge=0, le=20)
+    divider_count: int = Field(default=0, ge=0, le=8)
+    door_count: int = Field(default=0, ge=0, le=12)
+    drawer_count: int = Field(default=0, ge=0, le=12)
 
 
 class Component(BaseModel):
     id: str
-    kind: str
+    kind: ComponentKind
     material_id: str | None = None
-    length_formula: str | None = None
-    width_formula: str | None = None
     width: float
     height: float
     depth: float
@@ -32,9 +73,9 @@ class HardwareItem(BaseModel):
     code: str
     qty: int
     id: str | None = None
+    anchor: HardwareAnchor | None = None
     mesh_path: str | None = None
     svg_path: str | None = None
-    joint_type: str | None = None
 
 
 class MaterialSpec(BaseModel):
@@ -46,6 +87,7 @@ class MaterialSpec(BaseModel):
 class JointSpec(BaseModel):
     parent_id: str
     child_id: str
+    joint_rule: JointRule | None = None
     pos_x: float = 0.0
     pos_y: float = 0.0
     pos_z: float = 0.0

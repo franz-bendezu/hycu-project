@@ -63,6 +63,9 @@ class UpdateProjectRequest(BaseModel):
     target_depth: float | None = Field(default=None, gt=0)
     material_thickness: float | None = Field(default=None, ge=8, le=50)
     shelf_count: int | None = Field(default=None, ge=0, le=20)
+    divider_count: int | None = Field(default=None, ge=0, le=8)
+    door_count: int | None = Field(default=None, ge=0, le=12)
+    drawer_count: int | None = Field(default=None, ge=0, le=12)
 
 
 class ValidateResponse(BaseModel):

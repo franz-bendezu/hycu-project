@@ -4,14 +4,17 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.presentation.schemas.inference import InferenceImageOutput, InferenceOutput
+from app.presentation.schemas.inference import (
+    InferenceImageEvidence,
+    InferenceOutput,
+)
 
 
 class JobAssetResultResponse(BaseModel):
     job_id: str
     asset_id: str
     status: Literal["queued", "complete", "failed"]
-    result: InferenceImageOutput | None = None
+    result: InferenceImageEvidence | None = None
 
 
 class JobResponse(BaseModel):

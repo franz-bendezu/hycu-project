@@ -77,6 +77,15 @@ class InferenceImageOutput(BaseModel):
     image_url: str = Field(..., min_length=8)
 
 
+class InferenceImageEvidence(BaseModel):
+    image_url: str = Field(..., min_length=8)
+    width_px: int = Field(..., ge=1)
+    height_px: int = Field(..., ge=1)
+    detected_type: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    raw_detections: list[dict] = Field(default_factory=list)
+
+
 class InferenceOutput(BaseModel):
     detected_type: str
     confidence: float = Field(..., ge=0.0, le=1.0)
@@ -92,4 +101,5 @@ class InferenceOutput(BaseModel):
     hardware: list[InferenceHardwareRecommendation] | None = None
     image_url: str = Field(..., min_length=8)
     images_analyzed: int | None = Field(default=None, ge=1)
-    image_results: list[InferenceImageOutput] | None = None
+    image_results: list[InferenceImageEvidence] | None = None
+    evidence: list[InferenceImageEvidence] | None = None
