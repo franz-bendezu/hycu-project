@@ -26,3 +26,6 @@ projects/training/models/export/
 # OS
 .DS_Store
 Thumbs.db
+
+# General
+/.venv/

@@ -55,7 +55,7 @@ To make the problem tractable, the proposed system is divided into four main sub
 
 * **Data Acquisition:** Collecting and preprocessing images and metadata for panel-based furniture, such as cabinets and wardrobes, from retail platforms. This stage follows a Knowledge Discovery in Databases (KDD) approach so that the input data can be selected, cleaned, and standardized before model training.  
 * **Structural Recognition:** Segmenting a 2D image into hierarchical furniture components, including doors, drawers, and shelves. At this stage, one possible supporting method for structural interpretation is reversible jump Markov Chain Monte Carlo (rjMCMC), which can be used to estimate spatial structure and functional labels in modular furniture while operating over spaces of varying dimensionality (research article : 3D Semantic Segmentation of Modular Furniture using rjMCMC, Ishrat Badami et al., page 64\~72).  
-* **Model Transformation & Interaction:** Converting recognized visual components into an interactive parametric model. Detected panels, labels, and spatial relationships are translated into editable components, formula-based dimensions, and joint definitions, so the segmentation output becomes a structured parametric assembly. Variables such as width, depth, height, and shelf count are mapped to web-based controls so that users can modify the structure in real time without rebuilding the design from scratch (research article : Parametric Modelling in Furniture Design A Case Study: Two Door Wardrope, Seval Ozgel Felek, page 62\~74).  
+* **Model Transformation & Interaction:** Converting recognized visual components into an interactive parametric model. Detected panels, labels, and spatial relationships are translated into editable components, rule-based dimensions, and joint definitions, so the segmentation output becomes a structured parametric assembly. Variables such as width, depth, height, and shelf count are mapped to web-based controls so that users can modify the structure in real time without rebuilding the design from scratch (research article : Parametric Modelling in Furniture Design A Case Study: Two Door Wardrope, Seval Ozgel Felek, page 62\~74).  
 * **Validation & Output:** Checking structural consistency, inferring required hardware, and generating fabrication-oriented outputs such as 2D nesting layouts and printable blueprints.
 
 **IV. Pattern Recognition**  
@@ -94,7 +94,7 @@ This level specifies how the conceptual entities relate to one another and which
 **3\. Physical Modeling (Instantiation and Schema)**  
 This level translates the logical relationships into computable variables, database tables, and transformation rules for rendering and fabrication output.
 
-* **Parametric Variables (Formulas vs. Integers):** Rather than storing all dimensions as fixed values, the system stores some dimensions as formulas so they can respond dynamically to changes in product size or material thickness.  
+* **Parametric Variables (Rules vs. Integers):** Rather than storing all dimensions as fixed values, the system uses topological rules so they can respond dynamically to changes in product size or material thickness.
   * *Example:* $$Component_{Length} = Product_{Height} - (Material_{Thickness} * 2)$$ 
 * **Spatial Instantiation (The Transformation Matrix):**  
   Joints are instantiated through translation and rotation values that determine the global position of each child component relative to its parent:  
@@ -102,7 +102,7 @@ This level translates the logical relationships into computable variables, datab
 * **Database Schema Design:**  
   * products table: id, sku, target\_width, target\_height, target\_depth.  
   * materials table: id, thickness\_mm, texture\_map\_url.  
-  * components table: id, material\_id (FK), length\_formula, width\_formula.  
+  * components table: id, material\_id (FK).
   * hardware\_library table: id, 3d\_mesh\_path (.glb), 2d\_svg\_path.  
   * joints\_bom table (Junction): parent\_id, child\_id, pos\_x, pos\_y, pos\_z, rot\_x, rot\_y, rot\_z.  
   * features table: component\_id (FK), face\_index \[1-6\], u\_coord, v\_coord, operation\_type (e.g., $5mm$ Drill).  
@@ -128,10 +128,8 @@ class Material {
 
 class Component {
   +String id
+  +String kind
   +String material_id
-  +String length_formula
-  +String width_formula
-  +calculateDimensions()
 }
 
 class Hardware {
@@ -144,6 +142,7 @@ class Hardware {
 class Joint {
   +String parent_id
   +String child_id
+  +String joint_rule
   +Float pos_x
   +Float pos_y
   +Float pos_z
