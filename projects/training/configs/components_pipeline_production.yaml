@@ -4,11 +4,11 @@ prepare_clean: false
 validate_dataset: true
 
 dataset_yaml: datasets/yolo_dataset_components.yaml
-yolo_model: yolo11n.pt
-epochs: 50
-imgsz: 640
-batch: 16
-patience: 20
+yolo_model: yolo11s.pt # Upgraded from nano to small for better feature extraction
+epochs: 150 # Increased for better convergence
+imgsz: 1024 # Increased resolution for small part detection (hinges, slides)
+batch: 8 # Decreased to accommodate higher resolution in VRAM
+patience: 30 # Increased patience for longer training budget
 workers: 0
 
 project_dir: runs/train

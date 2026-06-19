@@ -6,6 +6,7 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+import torch
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.multioutput import MultiOutputRegressor
@@ -49,6 +50,12 @@ def train_detector(args: argparse.Namespace) -> Path:
         name=args.experiment,
         exist_ok=args.exist_ok,
         resume=args.resume,
+        # Optimization for small furniture components (hinges, slides, etc.)
+        box=7.5,      # Precise box localization
+        cls=1.0,      # Give more weight to correct classification
+        overlap_mask=True, # Better for components that overlap
+        mosaic=1.0,   # Keep mosaic at 1.0 to help with context
+        mixup=0.1,    # Add light mixup for generalization
     )
 
     run_dir = Path(result.save_dir)
