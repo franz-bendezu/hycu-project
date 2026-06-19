@@ -1,4 +1,5 @@
 import { ReactNode } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 
 type SectionCardProps = {
   title: string;
@@ -8,12 +9,12 @@ type SectionCardProps = {
 
 export function SectionCard({ title, subtitle, children }: SectionCardProps): React.JSX.Element {
   return (
-    <section className="panel section-card">
-      <header>
-        <h3>{title}</h3>
-        {subtitle ? <p>{subtitle}</p> : null}
-      </header>
-      <div>{children}</div>
-    </section>
+    <Card className="panel section-card">
+      <CardHeader className="section-card-header">
+        <CardTitle>{title}</CardTitle>
+        {subtitle ? <CardDescription className="section-card-subtitle">{subtitle}</CardDescription> : null}
+      </CardHeader>
+      <CardContent className="section-card-content">{children}</CardContent>
+    </Card>
   );
 }

@@ -50,6 +50,36 @@ export enum InferenceHardwareCode {
   HARDWARE_REVIEW_REQUIRED = "HARDWARE_REVIEW_REQUIRED",
 }
 
+export enum ProductInferredType {
+  CABINET = "cabinet",
+  DESK = "desk",
+  SHELF = "shelf",
+}
+
+export enum ProjectComponentKind {
+  LEFT_SIDE = "left_side",
+  RIGHT_SIDE = "right_side",
+  TOP_PANEL = "top_panel",
+  BOTTOM_PANEL = "bottom_panel",
+  BACK_PANEL = "back_panel",
+  SHELF = "shelf",
+  FRONT_PANEL = "front_panel",
+  DOOR_PANEL = "door_panel",
+  DRAWER_FRONT = "drawer_front",
+  LEFT_LEG_FRONT = "left_leg_front",
+  RIGHT_LEG_FRONT = "right_leg_front",
+  LEFT_LEG_BACK = "left_leg_back",
+  RIGHT_LEG_BACK = "right_leg_back",
+}
+
+export enum ProjectJointRule {
+  OVERLAP = "overlap",
+  INSET = "inset",
+  BETWEEN = "between",
+  FLUSH_BACK = "flush_back",
+  MOUNT = "mount",
+}
+
 export type InferenceOutput = {
   detected_type: string;
   confidence: number;
@@ -143,12 +173,15 @@ export type ProductSpec = {
   id?: string | null;
   sku?: string | null;
   name: string;
-  inferred_type?: "cabinet" | "desk" | "shelf";
+  inferred_type?: ProductInferredType;
   target_width: number;
   target_height: number;
   target_depth: number;
   material_thickness: number;
   shelf_count: number;
+  divider_count?: number;
+  door_count?: number;
+  drawer_count?: number;
 };
 
 export type ProjectAppearance = {
@@ -164,10 +197,8 @@ export type ProjectModel = {
   }>;
   components: Array<{
     id: string;
-    kind: string;
+    kind: ProjectComponentKind;
     material_id?: string | null;
-    length_formula?: string | null;
-    width_formula?: string | null;
     width: number;
     height: number;
     depth: number;
@@ -183,6 +214,7 @@ export type ProjectModel = {
   joints?: Array<{
     parent_id: string;
     child_id: string;
+    joint_rule?: ProjectJointRule | null;
     pos_x: number;
     pos_y: number;
     pos_z: number;

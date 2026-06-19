@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import { Button } from "../components/ui/button";
 import { SectionCard } from "../components/SectionCard";
 import { StatusPill } from "../components/StatusPill";
 import { useVisionWorkflow } from "../hooks/useVisionWorkflow";
@@ -82,27 +83,19 @@ export function ProjectStatusView(): React.JSX.Element {
             ) : (
               <p style={{ margin: 0, opacity: 0.8 }}>Validation snapshot unavailable.</p>
             )}
-            <button
+            <Button
               type="button"
-              className="secondary"
+              variant="secondary"
               onClick={() => void onValidateProject()}
               disabled={!projectId || activeAction === "Refreshing project status..."}
             >
               Recheck validation
-            </button>
+            </Button>
           </div>
 
-          <div style={{ display: "flex", gap: "0.55rem", flexWrap: "wrap" }}>
-            <Link to={`/projects/${project.key}/workspace`} className="button">
-              Open workspace
-            </Link>
-            <Link to={`/projects/${project.key}/fabrication-output`} className="button secondary">
-              View fabrication output
-            </Link>
-            <Link to="/" className="button secondary">
-              Back to home
-            </Link>
-          </div>
+          <p style={{ margin: 0, opacity: 0.82 }}>
+            Use the project navigation above to move between Analysis, Jobs, Model, and Fabrication.
+          </p>
         </div>
       </SectionCard>
     </section>

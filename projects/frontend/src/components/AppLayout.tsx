@@ -12,14 +12,14 @@ export function AppLayout(): React.JSX.Element {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <p style={{ margin: 0, letterSpacing: "0.08em", fontSize: "0.8rem", textTransform: "uppercase" }}>
+        <p className="app-kicker">
           Vision to Blueprint
         </p>
-        <h1>Modular Furniture Design Workspace</h1>
-        <p className="highlight">
+        <h1 className="app-title">Modular Furniture Design Workspace</h1>
+        <p className="highlight app-highlight">
           Frontend is modularized into views and components with routing, while backend remains the orchestration boundary.
         </p>
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <div className="app-status-row">
           <StatusPill label={`Backend: ${backendStatus}`} tone={tone} />
           {activeAction ? <StatusPill label={activeAction} tone="warning" /> : null}
           {error ? (
@@ -30,6 +30,16 @@ export function AppLayout(): React.JSX.Element {
         </div>
 
       </header>
+
+      {activeAction ? (
+        <section className="global-feedback" role="status" aria-live="polite">
+          <div className="global-feedback-row">
+            <span className="global-feedback-spinner" aria-hidden="true" />
+            <p>{activeAction}</p>
+          </div>
+          <div className="global-feedback-progress" aria-hidden="true" />
+        </section>
+      ) : null}
 
       <Outlet />
 

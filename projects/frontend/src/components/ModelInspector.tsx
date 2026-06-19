@@ -1,11 +1,19 @@
+import { useState } from "react";
+
 import { buildFabricationPackage } from "../domain/fabrication";
 import { useVisionWorkflow } from "../hooks/useVisionWorkflow";
 import { ParametricViewer } from "./ParametricViewer";
 import { SectionCard } from "./SectionCard";
 import { StatusPill } from "./StatusPill";
 
+enum ModelViewMode {
+  THREE_D = "3d",
+  JSON = "json",
+}
+
 export function ModelInspector(): React.JSX.Element {
   const { projectId, projectModel, validation, queuedImages, jobId } = useVisionWorkflow();
+  const [viewMode, setViewMode] = useState<ModelViewMode>(ModelViewMode.THREE_D);
   const completedAnalyses = queuedImages.filter((item) => item.status === "complete").length;
   const failedAnalyses = queuedImages.filter((item) => item.status === "failed").length;
 
@@ -15,18 +23,49 @@ export function ModelInspector(): React.JSX.Element {
         title="Real-time 3D workspace"
         subtitle="Diagram parity: display model and update visuals after each change"
       >
-        <ParametricViewer model={projectModel} validation={validation} />
-        <p style={{ marginBottom: 0 }}>
-          {projectModel
-            ? `Model: ${projectModel.product.name} (${projectModel.components.length} components)`
-            : "No model yet. Create a project to render preview."}
-        </p>
-        <p style={{ marginBottom: 0 }}>
-          Active job: <strong>{jobId || "none"}</strong>
-        </p>
-        <p style={{ marginBottom: 0 }}>
-          Batch summary: {completedAnalyses} complete, {failedAnalyses} failed
-        </p>
+        <div className="view-mode-switch" role="tablist" aria-label="Model view mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={viewMode === ModelViewMode.THREE_D}
+            className={viewMode === ModelViewMode.THREE_D ? "primary" : "secondary"}
+            onClick={() => setViewMode(ModelViewMode.THREE_D)}
+          >
+            3D
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={viewMode === ModelViewMode.JSON}
+            className={viewMode === ModelViewMode.JSON ? "primary" : "secondary"}
+            onClick={() => setViewMode(ModelViewMode.JSON)}
+          >
+            JSON
+          </button>
+        </div>
+
+        {viewMode === ModelViewMode.THREE_D ? (
+          <ParametricViewer model={projectModel} validation={validation} />
+        ) : (
+          <div className="json-preview-shell">
+            <pre className="json-preview-content">
+              {projectModel ? JSON.stringify(projectModel, null, 2) : "No model yet."}
+            </pre>
+          </div>
+        )}
+        <div className="model-stats-grid">
+          <p className="model-stat-pill">
+            {projectModel
+              ? `Model: ${projectModel.product.name} (${projectModel.components.length} components)`
+              : "No model yet. Create a project to render preview."}
+          </p>
+          <p className="model-stat-pill">
+            Active job: <strong>{jobId || "none"}</strong>
+          </p>
+          <p className="model-stat-pill">
+            Batch summary: {completedAnalyses} complete, {failedAnalyses} failed
+          </p>
+        </div>
       </SectionCard>
 
       <SectionCard

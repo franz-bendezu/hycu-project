@@ -1,5 +1,6 @@
 import { SectionCard } from "../components/SectionCard";
 import { StatusPill } from "../components/StatusPill";
+import { Button } from "../components/ui/button";
 import { useVisionWorkflow } from "../hooks/useVisionWorkflow";
 
 function toneForStatus(status: "queued" | "complete" | "failed"): "neutral" | "warning" | "ok" | "error" {
@@ -22,19 +23,16 @@ export function JobsView(): React.JSX.Element {
         subtitle="Batch jobs created for this project"
       >
         {projectJobs.length === 0 ? (
-          <p>No jobs yet. Run analysis from the Analysis route.</p>
+          <div className="empty-state-panel" role="status" aria-live="polite">
+            <h4>No jobs yet</h4>
+            <p>Run image analysis from the Analysis tab and your job history will appear here.</p>
+          </div>
         ) : (
-          <div style={{ display: "grid", gap: "0.6rem" }}>
+          <div className="jobs-grid">
             {projectJobs.map((job) => (
               <div
                 key={job.job_id}
-                style={{
-                  border: "1px solid rgba(20, 38, 68, 0.14)",
-                  borderRadius: "12px",
-                  padding: "0.7rem 0.8rem",
-                  display: "grid",
-                  gap: "0.35rem",
-                }}
+                className="job-card"
               >
                 <p style={{ margin: 0 }}>
                   Job ID: <strong>{job.job_id}</strong>
@@ -46,14 +44,14 @@ export function JobsView(): React.JSX.Element {
                 <p style={{ margin: 0 }}>
                   Images analyzed: <strong>{job.result?.images_analyzed || 0}</strong>
                 </p>
-                <button
+                <Button
                   type="button"
-                  className="secondary"
+                  variant="secondary"
                   onClick={() => setActiveJob(job.job_id)}
                   disabled={job.job_id === jobId}
                 >
                   {job.job_id === jobId ? "Active job" : "Use as active job"}
-                </button>
+                </Button>
               </div>
             ))}
           </div>

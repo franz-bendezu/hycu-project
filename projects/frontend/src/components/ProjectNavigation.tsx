@@ -44,31 +44,36 @@ export function ProjectNavigation(): React.JSX.Element | null {
           end
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Status
+          <span className="project-nav-title">Overview</span>
+          <span className="project-nav-subtitle">Status and checks</span>
         </NavLink>
         <NavLink
           to={`/projects/${projectKey}/workspace`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Analysis
+          <span className="project-nav-title">Analysis</span>
+          <span className="project-nav-subtitle">Upload and detect</span>
         </NavLink>
         <NavLink
           to={`/projects/${projectKey}/jobs`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Jobs
+          <span className="project-nav-title">Jobs</span>
+          <span className="project-nav-subtitle">History and results</span>
         </NavLink>
         <NavLink
           to={`/projects/${projectKey}/model`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Model
+          <span className="project-nav-title">Model</span>
+          <span className="project-nav-subtitle">3D and topology</span>
         </NavLink>
         <NavLink
           to={`/projects/${projectKey}/fabrication-output`}
           className={({ isActive }) => (isActive ? "project-nav-link active" : "project-nav-link")}
         >
-          Fabrication Output
+          <span className="project-nav-title">Fabrication</span>
+          <span className="project-nav-subtitle">BOM and blueprint</span>
         </NavLink>
       </nav>
     </section>
