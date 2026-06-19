@@ -6,7 +6,7 @@ from pathlib import Path
 SUPPORTED_TYPES = ("cabinet", "desk", "shelf")
 
 KNOWN_INTERIOR_PARTS = {"shelf_panel", "drawer_box", "divider_panel", "telescopic_slide", "rail", "hinge"}
-HARDWARE_PARTS = {"telescopic_slide", "hinge", "handle", "bracket", "rail", "sliding_door_track"}
+HARDWARE_PARTS = {"telescopic_slide", "hinge", "handle_pull", "bracket", "rail", "sliding_door_track"}
 
 COMPONENT_ALIAS_EXACT = {
     "cabinet": "cabinet_body",
@@ -29,7 +29,7 @@ COMPONENT_ALIAS_CONTAINS = (
     ("shelf", "shelf_panel"),
     ("divider", "divider_panel"),
     ("leg", "leg"),
-    ("handle", "handle"),
+    ("handle", "handle_pull"),
     ("hinge", "hinge"),
     ("slide", "telescopic_slide"),
     ("rail", "rail"),
@@ -46,14 +46,22 @@ def get_detector_model_path() -> Path:
 def get_detector_labels() -> tuple[str, ...]:
     raw = os.getenv("INFERENCE_LABELS")
     if not raw:
-        return SUPPORTED_TYPES
+        # Default labels for the components profile
+        return (
+            "cabinet", "desk", "shelf", "cabinet_body", "desk_frame",
+            "side_panel", "top_panel", "bottom_panel", "back_panel",
+            "door_panel", "shelf_panel", "divider_panel", "drawer_front",
+            "drawer_box", "leg", "front_apron", "handle_pull", "hinge",
+            "telescopic_slide", "rail", "sliding_door_track"
+        )
     labels = tuple(label.strip() for label in raw.split(",") if label.strip())
     if not labels:
         raise RuntimeError("INFERENCE_LABELS is set but empty")
     return labels
 
 def get_confidence_threshold() -> float:
-    return float(os.getenv("INFERENCE_CONFIDENCE_THRESHOLD", "0.25"))
+    # Lowered default for prototype stage to see more potential detections
+    return float(os.getenv("INFERENCE_CONFIDENCE_THRESHOLD", "0.10"))
 
 def get_image_size_fallback() -> int:
     return int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort  # type: ignore[import-not-found]
-from fastapi import HTTPException
 from PIL import Image
 
 from app.core.config import get_image_size_fallback, get_execution_providers
-from app.utils.image import preprocess
+from app.utils.image import nms, preprocess
+
+from app.schemas import ImageEvidence, InferResponse, ProductType
+
+
+logger = logging.getLogger(__name__)
 
 class YoloDetector:
     def __init__(self, model_path: Path, labels: tuple[str, ...], score_threshold: float) -> None:
@@ -18,6 +23,9 @@ class YoloDetector:
         try:
             providers = get_execution_providers()
             self._session = ort.InferenceSession(str(model_path), providers=providers)
+            logger.info("Loaded YOLO model with providers: %s", self._session.get_providers())
+            logger.debug("Model inputs: %s", [i.name for i in self._session.get_inputs()])
+            logger.debug("Model outputs: %s", [o.name for o in self._session.get_outputs()])
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to load YOLO model from {model_path}: {exc}") from exc
 
@@ -45,65 +53,184 @@ class YoloDetector:
         fallback_size = get_image_size_fallback()
         return fallback_size, fallback_size
 
-    def analyze(self, image: Image.Image) -> tuple[str, float, list[tuple[int, float]]]:
-        tensor = preprocess(image, self.input_width, self.input_height)
-        outputs = self._session.run(None, {self.input_name: tensor})
-        return self._decode_prediction(outputs, self.labels)
+    def analyze(self, image_data: list[tuple[Image.Image, str]]) -> InferResponse:
+        from app.services.processor import assemble_project
+        
+        evidence_list: list[ImageEvidence] = []
+        for image, url in image_data:
+            orig_w, orig_h = image.size
+            tensor = preprocess(image, self.input_width, self.input_height)
+            outputs = self._session.run(None, {self.input_name: tensor})
+            
+            # Extract raw detections
+            raw_detections = self._extract_detections(outputs[0], len(self.labels))
+            
+            # Post-process: scale xyxy boxes from model-space to image-space.
+            scaled_detections = []
+            x_scale = orig_w / self.input_width
+            y_scale = orig_h / self.input_height
+            
+            for d in raw_detections:
+                x1, y1, x2, y2 = d["box"]
+                x1 *= x_scale
+                y1 *= y_scale
+                x2 *= x_scale
+                y2 *= y_scale
+                
+                scaled_detections.append({
+                    "box": (
+                        round(x1, 1),
+                        round(y1, 1),
+                        round(x2, 1),
+                        round(y2, 1),
+                    ),
+                    "score": d["score"],
+                    "class_id": d["class_id"],
+                    "label": self.labels[d["class_id"]] if d["class_id"] < len(self.labels) else "unknown"
+                })
 
-    def _decode_prediction(self, outputs: list[np.ndarray], labels: tuple[str, ...]) -> tuple[str, float, list[tuple[int, float]]]:
-        if not outputs:
-            raise HTTPException(status_code=500, detail="YOLO model returned no outputs")
+            # Resolved confidence and type for this image
+            if scaled_detections:
+                best_det = max(scaled_detections, key=lambda x: x["score"])
+                confidence = best_det["score"]
+                # Resolve product type
+                product_types = tuple(item.value for item in ProductType)
+                prod_dets = [d for d in scaled_detections if d["label"] in product_types]
+                if prod_dets:
+                    detected_type = ProductType(max(prod_dets, key=lambda x: x["score"])["label"])
+                else:
+                    detected_type = ProductType.CABINET
+            else:
+                confidence = 0.0
+                detected_type = ProductType.CABINET
 
+            evidence_list.append(
+                ImageEvidence(
+                    image_url=url,
+                    width_px=orig_w,
+                    height_px=orig_h,
+                    detected_type=detected_type,
+                    confidence=confidence,
+                    raw_detections=scaled_detections,
+                )
+            )
+
+        return assemble_project(evidence_list, self.labels, self.score_threshold)
+
+    def _decode_prediction(self, outputs: list[np.ndarray], labels: tuple[str, ...]) -> tuple[ProductType, float, list[dict]]:
+        # This method is now partially bypassed by the logic in analyze() 
+        # but kept for backward compatibility if needed internally
         detections = self._extract_detections(outputs[0], len(labels))
         if not detections:
-            raise HTTPException(status_code=422, detail="YOLO model produced no detections")
+            return ProductType.CABINET, 0.0, []
 
         category_scores: dict[str, float] = {label: 0.0 for label in labels}
-        for class_id, score in detections:
+        for det in detections:
+            class_id = det["class_id"]
+            score = det["score"]
             if class_id < 0 or class_id >= len(labels):
                 continue
             category = labels[class_id]
             category_scores[category] = max(category_scores[category], score)
 
-        best_category = max(category_scores, key=category_scores.get)
-        best_score = category_scores[best_category]
+        # Better product type resolution: prefer top-level structure classes
+        product_type_values = tuple(item.value for item in ProductType)
+        product_scores = {k: v for k, v in category_scores.items() if k in product_type_values}
+        
+        if any(product_scores.values()):
+            best_category = ProductType(max(product_scores, key=product_scores.get))
+            best_score = product_scores[best_category]
+        else:
+            # Keep a deterministic fallback and let the assembler handle refinement.
+            best_category = ProductType.CABINET
+            best_score = max(category_scores.values()) if category_scores else 0.0
 
         return best_category, round(float(best_score), 3), detections
 
-    def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[tuple[int, float]]:
+    def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[dict]:
         tensor = np.array(output)
+
+        logger.debug("Raw tensor shape before processing: %s", tensor.shape)
+        
         if tensor.ndim == 3 and tensor.shape[0] == 1:
             tensor = tensor[0]
 
-        if tensor.ndim != 2:
-            return []
-
-        if tensor.shape[0] < tensor.shape[1]:
+        # YOLO exports are often [1, 4+nc, 8400] or [1, 5+nc, 8400].
+        # Normalize to [8400, channels].
+        if tensor.ndim == 2 and tensor.shape[0] < tensor.shape[1] and tensor.shape[0] in (4 + num_labels, 5 + num_labels):
+            logger.debug("Transposing tensor from %s to %s", tensor.shape, tensor.T.shape)
             tensor = tensor.T
 
-        rows, cols = tensor.shape
-        detections: list[tuple[int, float]] = []
+        if tensor.ndim != 2:
+            logger.warning("Unexpected tensor rank: %s", tensor.ndim)
+            return []
 
+        _, cols = tensor.shape
+        detections: list[dict] = []
+        
+        logger.debug("Final tensor shape: %s, labels expected: %s", tensor.shape, num_labels)
+
+        # Case 1: Standard [x1, y1, x2, y2, score, class]
         if cols == 6:
             for row in tensor:
                 score = float(row[4])
-                class_id = int(row[5])
-                detections.append((class_id, score))
+                if score >= self.score_threshold:
+                    detections.append({
+                        "box": (float(row[0]), float(row[1]), float(row[2]), float(row[3])),
+                        "score": score,
+                        "class_id": int(row[5])
+                    })
             return detections
 
-        if cols < 4 + num_labels:
+        # Case 2: YOLO format [cx, cy, w, h, class_scores...] or
+        # [cx, cy, w, h, objectness, class_scores...]
+        max_seen = 0.0
+        effective_threshold = self.score_threshold
+        has_objectness = cols >= 5 + num_labels
+        class_score_start = 5 if has_objectness else 4
+        available_labels = max(0, cols - class_score_start)
+        label_count = min(num_labels, available_labels)
+        if label_count == 0:
+            logger.warning("No class scores available in tensor with shape %s", tensor.shape)
             return []
-
+        
         for row in tensor:
-            if cols >= 5 + num_labels:
-                objectness = float(row[4])
-                class_scores = row[5 : 5 + num_labels]
-                scores = class_scores * objectness
-            else:
-                scores = row[4 : 4 + num_labels]
+            if len(row) < class_score_start + label_count:
+                continue
 
-            class_id = int(np.argmax(scores))
-            score = float(scores[class_id])
-            detections.append((class_id, score))
+            class_scores = row[class_score_start : class_score_start + label_count]
+            if class_scores.size == 0:
+                continue
+                
+            class_id = int(np.argmax(class_scores))
+            class_conf = float(class_scores[class_id])
+            obj_conf = float(row[4]) if has_objectness else 1.0
+            score = obj_conf * class_conf
+            
+            if score > max_seen:
+                max_seen = score
+            
+            if score >= effective_threshold:
+                cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                detections.append({
+                    "box": (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                    "score": score,
+                    "class_id": class_id
+                })
 
+        # Post-process with NMS
+        if detections:
+            boxes = np.array([d["box"] for d in detections])
+            scores = np.array([d["score"] for d in detections])
+            
+            indices_to_keep = nms(boxes, scores, iou_threshold=0.5)
+            
+            logger.debug("NMS kept %s of %s boxes", len(indices_to_keep), len(detections))
+            detections = [detections[i] for i in indices_to_keep]
+
+        logger.debug("Max confidence score observed: %.4f", max_seen)
+        if len(detections) == 0:
+            logger.debug("No boxes found with threshold %.4f", effective_threshold)
+        else:
+            logger.debug("Found %s boxes with threshold %.4f", len(detections), effective_threshold)
         return detections

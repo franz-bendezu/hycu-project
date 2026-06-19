@@ -1,11 +1,14 @@
 import base64
 import io
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
+from app.schemas import ImageEvidence
+from app.services.processor import assemble_project
 
 
 def _solid_image(width: int, height: int, color: tuple[int, int, int]) -> Image.Image:
@@ -22,20 +25,30 @@ def _png_data_url(image: Image.Image) -> str:
 class _AnalyzeDetectorStub:
     def __init__(
         self,
-        outputs: list[tuple[str, float, list[tuple[int, float]]]],
-        labels: tuple[str, ...] = ("cabinet", "desk", "shelf"),
-        score_threshold: float = 0.25,
+        outputs: list[tuple[str, float, list[dict]]],
+        labels: tuple[str, ...],
+        score_threshold: float,
     ) -> None:
         self._outputs = outputs
-        self._idx = 0
         self.labels = labels
         self.score_threshold = score_threshold
 
-    def analyze(self, image: Image.Image) -> tuple[str, float, list[tuple[int, float]]]:
-        _ = image
-        value = self._outputs[self._idx % len(self._outputs)]
-        self._idx += 1
-        return value
+    def analyze(self, images_with_urls: list[tuple[Image.Image, str]]):
+        evidence: list[ImageEvidence] = []
+        for idx, (image, url) in enumerate(images_with_urls):
+            out_idx = min(idx, len(self._outputs) - 1)
+            detected_type, confidence, raw_detections = self._outputs[out_idx]
+            evidence.append(
+                ImageEvidence(
+                    image_url=url,
+                    width_px=image.width,
+                    height_px=image.height,
+                    detected_type=detected_type,
+                    confidence=confidence,
+                    raw_detections=raw_detections,
+                )
+            )
+        return assemble_project(evidence, self.labels, self.score_threshold)
 
 
 def test_startup_fails_when_detector_unavailable(monkeypatch) -> None:
@@ -53,7 +66,11 @@ def test_infer_uses_aspect_fallback_on_low_confidence(monkeypatch) -> None:
     payload = {"image_urls": [_png_data_url(_solid_image(320, 640, (120, 120, 120)))]}
     monkeypatch.setattr(
         "app.main._detector",
-        lambda: _AnalyzeDetectorStub([("desk", 0.12, [(1, 0.12)])]),
+        lambda: _AnalyzeDetectorStub(
+            outputs=[("desk", 0.12, [])],
+            labels=("cabinet", "desk", "shelf"),
+            score_threshold=0.25,
+        ),
     )
 
     with TestClient(app) as client:
@@ -72,10 +89,14 @@ def test_infer_accepts_batch_images_and_returns_aggregate(monkeypatch) -> None:
     image_b = _png_data_url(_solid_image(320, 240, (180, 180, 180)))
     monkeypatch.setattr(
         "app.main._detector",
-        lambda: _AnalyzeDetectorStub([
-            ("desk", 0.7, [(1, 0.7)]),
-            ("cabinet", 0.9, [(0, 0.9)]),
-        ]),
+        lambda: _AnalyzeDetectorStub(
+            outputs=[
+                ("desk", 0.7, [{"class_id": 1, "score": 0.7, "box": (10.0, 10.0, 80.0, 80.0)}]),
+                ("cabinet", 0.9, [{"class_id": 0, "score": 0.9, "box": (20.0, 20.0, 90.0, 90.0)}]),
+            ],
+            labels=("cabinet", "desk", "shelf"),
+            score_threshold=0.25,
+        ),
     )
 
     with TestClient(app) as client:
@@ -93,7 +114,15 @@ def test_infer_counts_component_quantities_from_detections(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._detector",
         lambda: _AnalyzeDetectorStub(
-            outputs=[("cabinet", 0.82, [(0, 0.88), (0, 0.79), (0, 0.33)])],
+            outputs=[(
+                "cabinet",
+                0.82,
+                [
+                    {"class_id": 0, "score": 0.88, "box": (10.0, 10.0, 70.0, 120.0)},
+                    {"class_id": 0, "score": 0.79, "box": (72.0, 10.0, 130.0, 120.0)},
+                    {"class_id": 0, "score": 0.33, "box": (132.0, 10.0, 190.0, 120.0)},
+                ],
+            )],
             labels=("door_panel", "shelf_panel", "back_panel"),
             score_threshold=0.25,
         ),
@@ -106,9 +135,10 @@ def test_infer_counts_component_quantities_from_detections(monkeypatch) -> None:
     body = response.json()
     components = {component["name"]: component for component in body["components"]}
     assert components["door_panel"]["quantity"] == 3
-    assert components["door_panel"]["id"] == "cmp_door_panel"
+    uuid.UUID(components["door_panel"]["id"])
     assert "component_index" in body and isinstance(body["component_index"], dict)
-    assert body["component_index"]["cmp_door_panel"]["name"] == "door_panel"
+    door_component_id = components["door_panel"]["id"]
+    assert body["component_index"][door_component_id]["name"] == "door_panel"
     assert "joints" in body and isinstance(body["joints"], list)
     assert all("parent_component_id" in item and "child_component_id" in item for item in body["joints"])
     assert "hardware" in body and isinstance(body["hardware"], list)
@@ -119,7 +149,15 @@ def test_infer_maps_label_aliases_to_component_and_hardware(monkeypatch) -> None
     monkeypatch.setattr(
         "app.main._detector",
         lambda: _AnalyzeDetectorStub(
-            outputs=[("cabinet", 0.9, [(0, 0.9), (1, 0.8), (2, 0.8)])],
+            outputs=[(
+                "cabinet",
+                0.9,
+                [
+                    {"class_id": 0, "score": 0.9, "box": (5.0, 5.0, 200.0, 300.0)},
+                    {"class_id": 1, "score": 0.8, "box": (15.0, 35.0, 40.0, 120.0)},
+                    {"class_id": 2, "score": 0.8, "box": (45.0, 40.0, 160.0, 100.0)},
+                ],
+            )],
             labels=("wardrobe", "hinge", "drawer_front"),
             score_threshold=0.25,
         ),

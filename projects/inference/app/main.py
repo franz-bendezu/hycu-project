@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException
+from PIL import Image
 
 from app.core.config import (
     get_detector_model_path,
@@ -13,32 +14,18 @@ from app.core.config import (
 from app.schemas import (
     InferRequest,
     InferResponse,
-    InferImageResult,
-    InteriorAssessment,
-    DoorAssessment,
-    UncertaintyAssessment,
 )
 from app.services.detector import YoloDetector
-from app.services.processor import (
-    estimate_dimensions,
-    fallback_type_from_aspect,
-    components_from_detections,
-    split_components,
-    interior_visibility,
-    door_metadata,
-    has_uncertain_hardware,
-    build_joints,
-    build_hardware,
-    component_index,
-    aggregate_results,
-)
+from app.services.segmenter import Segmenter
+from app.services.tracker import MultiViewTracker
 from app.utils.image import load_image_bytes, open_image
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Fail fast during service boot when the detector artifact is missing or invalid.
+    # Fail fast during service boot when artifacts are missing or invalid.
     _detector()
+    _segmenter()
     yield
 
 
@@ -54,52 +41,30 @@ def _detector() -> YoloDetector:
     )
 
 
-def _infer_single(image_url: str) -> InferImageResult:
-    image_bytes = load_image_bytes(image_url)
-    image = open_image(image_bytes)
-    detector = _detector()
-    detected_type, confidence, detections = detector.analyze(image)
-    
-    if confidence < 0.2:
-        detected_type = fallback_type_from_aspect(image)
-        
-    components = components_from_detections(
-        detections,
-        detector.labels,
-        detector.score_threshold,
-        detected_type,
-    )
-    structural_components, hardware_components = split_components(components)
-    visibility, coverage_ratio, unknown_interior = interior_visibility(
-        structural_components,
-        hardware_components,
-    )
-    door_type, door_count_uncertain = door_metadata(structural_components, hardware_components, visibility)
-    uncertain_hardware = has_uncertain_hardware(detections, detector.labels, detector.score_threshold)
-    joints = build_joints(structural_components, hardware_components, door_type)
-    hardware = build_hardware(joints, uncertain_hardware)
-    suggested_width, suggested_height, suggested_depth = estimate_dimensions(detected_type, image)
-    index = component_index(components)
-    
-    return InferImageResult(
-        detected_type=detected_type,
-        confidence=confidence,
-        suggested_width=suggested_width,
-        suggested_height=suggested_height,
-        suggested_depth=suggested_depth,
-        components=components,
-        component_index=index,
-        interior=InteriorAssessment(
-            visibility=visibility,
-            coverage_ratio=coverage_ratio,
-            unknown_interior=unknown_interior,
-        ),
-        door=DoorAssessment(type=door_type, count_uncertain=door_count_uncertain),
-        uncertainty=UncertaintyAssessment(hardware_uncertain=uncertain_hardware),
-        joints=joints,
-        hardware=hardware,
-        image_url=image_url,
-    )
+@lru_cache(maxsize=1)
+def _segmenter() -> Segmenter:
+    # Placeholder for model path configuration
+    model_path = "path/to/sam2/model.pth"
+    return Segmenter(model_path=model_path)
+
+
+@lru_cache(maxsize=1)
+def _tracker() -> MultiViewTracker:
+    return MultiViewTracker(iou_threshold=0.35, max_age=2)
+
+
+def load_all_images(image_urls: list[str]) -> list[tuple[Image.Image, str]]:
+    results = []
+    for url in image_urls:
+        try:
+            image_bytes = load_image_bytes(url)
+            image = open_image(image_bytes)
+            results.append((image, url))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Could not load image from {url}: {str(exc)}"
+            )
+    return results
 
 
 @app.get("/health")
@@ -119,5 +84,32 @@ def health() -> dict:
 
 @app.post("/infer", response_model=InferResponse)
 def infer(payload: InferRequest) -> InferResponse:
-    results = [_infer_single(image_url=url) for url in payload.image_urls]
-    return aggregate_results(results)
+    images_with_urls = load_all_images(payload.image_urls)
+
+    # Stage 1: Object Detection
+    detector = _detector()
+    detection_result = detector.analyze(images_with_urls)
+
+    # Stage 2: Multi-view tracking + segmentation
+    segmenter = _segmenter()
+    tracker = _tracker()
+    for idx, evidence in enumerate(detection_result.evidence):
+        image, _ = images_with_urls[idx]
+
+        normalized_detections: list[dict] = []
+        for detection in evidence.raw_detections:
+            box = detection.get("box")
+            if isinstance(box, (tuple, list)) and len(box) == 4:
+                normalized_detections.append(detection)
+
+        tracked = tracker.update(normalized_detections)
+        boxes = [tuple(item["box"]) for item in tracked if isinstance(item.get("box"), (list, tuple))]
+        masks = segmenter.predict(image, boxes) if boxes else []
+
+        for det_idx, item in enumerate(tracked):
+            if det_idx < len(masks):
+                item["mask_area_px"] = int(masks[det_idx].sum())
+
+        evidence.raw_detections = tracked
+
+    return detection_result

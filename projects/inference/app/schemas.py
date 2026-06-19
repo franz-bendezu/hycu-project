@@ -30,6 +30,17 @@ class DoorType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProductType(StrEnum):
+    CABINET = "cabinet"
+    DESK = "desk"
+    SHELF = "shelf"
+
+
+class SegmentationBackend(StrEnum):
+    BOX_RASTERIZER = "box-rasterizer"
+    SAM2 = "sam2"
+
+
 class JointType(StrEnum):
     CAM_LOCK = "cam_lock"
     SHELF_PIN = "shelf_pin"
@@ -63,6 +74,9 @@ class Component(BaseModel):
     name: str
     kind: ComponentKind
     quantity: int = Field(..., ge=1)
+    # Positioning metadata for 3D reconstruction
+    position_label: str | None = None  # e.g., "left", "right", "top", "bottom"
+    box_corners: tuple[float, float, float, float] | None = None  # [x1, y1, x2, y2] normalized
 
 
 class InteriorAssessment(BaseModel):
@@ -94,24 +108,17 @@ class HardwareRecommendation(BaseModel):
     reason: str | None = None
 
 
-class InferImageResult(BaseModel):
-    detected_type: str
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    suggested_width: float = Field(..., gt=0)
-    suggested_height: float = Field(..., gt=0)
-    suggested_depth: float = Field(..., gt=0)
-    components: list[Component]
-    component_index: dict[str, Component]
-    interior: InteriorAssessment
-    door: DoorAssessment
-    uncertainty: UncertaintyAssessment
-    joints: list[JointEvidence]
-    hardware: list[HardwareRecommendation]
+class ImageEvidence(BaseModel):
     image_url: str = Field(..., min_length=8)
+    width_px: int
+    height_px: int
+    detected_type: ProductType
+    confidence: float
+    raw_detections: list[dict] = Field(default_factory=list)
 
 
 class InferResponse(BaseModel):
-    detected_type: str
+    detected_type: ProductType
     confidence: float = Field(..., ge=0.0, le=1.0)
     suggested_width: float = Field(..., gt=0)
     suggested_height: float = Field(..., gt=0)
@@ -125,4 +132,5 @@ class InferResponse(BaseModel):
     hardware: list[HardwareRecommendation]
     image_url: str = Field(..., min_length=8)
     images_analyzed: int = Field(default=1, ge=1)
-    image_results: list[InferImageResult]
+    image_results: list[ImageEvidence] = Field(default_factory=list)
+    evidence: list[ImageEvidence] = Field(default_factory=list)
