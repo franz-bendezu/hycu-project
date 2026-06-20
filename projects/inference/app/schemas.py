@@ -32,8 +32,15 @@ class DoorType(StrEnum):
 
 class ProductType(StrEnum):
     CABINET = "cabinet"
+    WARDROBE = "wardrobe"
+    BOOKCASE = "bookcase"
     DESK = "desk"
+    TABLE = "table"
     SHELF = "shelf"
+    NIGHTSTAND = "nightstand"
+    DRESSER = "dresser"
+    SIDEBOARD = "sideboard"
+    TV_STAND = "tv_stand"
 
 
 class SegmentationBackend(StrEnum):

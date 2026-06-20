@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -10,6 +10,13 @@ class TrackState:
     box: tuple[float, float, float, float]
     score: float
     age: int = 0
+    class_scores: dict[int, float] = field(default_factory=dict)
+
+
+def _dominant_class_id(class_scores: dict[int, float], fallback: int) -> int:
+    if not class_scores:
+        return fallback
+    return max(class_scores, key=class_scores.get)
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -64,39 +71,54 @@ class MultiViewTracker:
 
             class_id = int(det.get("class_id", -1))
             best_idx = -1
+            best_score = -1.0
             best_iou = 0.0
 
             for idx, track in enumerate(self._tracks):
                 if track.track_id in assigned_track_ids:
                     continue
-                if track.class_id != class_id:
-                    continue
                 iou_score = _iou(track.box, (float(box[0]), float(box[1]), float(box[2]), float(box[3])))
-                if iou_score > best_iou:
+                if iou_score <= 0:
+                    continue
+
+                # Prefer same-class matches, but allow class-jitter recovery when IoU is strong.
+                class_bonus = 0.10 if track.class_id == class_id else -0.12
+                candidate_score = iou_score + class_bonus
+                if candidate_score > best_score:
+                    best_score = candidate_score
                     best_iou = iou_score
                     best_idx = idx
 
-            if best_idx >= 0 and best_iou >= self.iou_threshold:
+            cross_class_iou_floor = max(self.iou_threshold + 0.18, 0.55)
+            if best_idx >= 0 and (
+                best_iou >= self.iou_threshold
+                or (self._tracks[best_idx].class_id != class_id and best_iou >= cross_class_iou_floor)
+            ):
                 track = self._tracks[best_idx]
                 track.box = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
                 track.score = float(det.get("score", track.score))
+                track.class_scores[class_id] = track.class_scores.get(class_id, 0.0) + float(det.get("score", 0.0))
+                track.class_id = _dominant_class_id(track.class_scores, class_id)
                 track.age = 0
                 assigned_track_ids.add(track.track_id)
 
                 updated = dict(det)
                 updated["track_id"] = track.track_id
                 updated["track_iou"] = round(best_iou, 4)
+                updated["class_id"] = track.class_id
                 output.append(updated)
             else:
                 track_id = self._next_track_id
                 self._next_track_id += 1
+                initial_score = float(det.get("score", 0.0))
                 self._tracks.append(
                     TrackState(
                         track_id=track_id,
                         class_id=class_id,
                         box=(float(box[0]), float(box[1]), float(box[2]), float(box[3])),
-                        score=float(det.get("score", 0.0)),
+                        score=initial_score,
                         age=0,
+                        class_scores={class_id: initial_score},
                     )
                 )
                 assigned_track_ids.add(track_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from statistics import mean
 
 from PIL import Image
@@ -10,6 +11,10 @@ from app.core.config import (
     COMPONENT_ALIAS_CONTAINS,
     HARDWARE_PARTS,
     KNOWN_INTERIOR_PARTS,
+    PRODUCT_TYPE_ALIASES,
+    PRODUCT_TYPE_COMPONENT_HINTS,
+    PRODUCT_TYPE_COMPONENT_MINIMUMS,
+    PRODUCT_TYPE_CONFIDENCE_MULTIPLIERS,
 )
 from app.schemas import (
     Component,
@@ -33,26 +38,86 @@ def estimate_dimensions(category: ProductType, image: Image.Image) -> tuple[floa
     width_px, height_px = image.size
     aspect = width_px / max(height_px, 1)
 
-    if category == ProductType.DESK:
+    if category in {ProductType.DESK, ProductType.TABLE}:
         suggested_width = 1200 + max(0, (aspect - 1.2) * 220)
         return round(suggested_width, 1), 750.0, 600.0
 
-    if category == ProductType.SHELF:
+    if category in {ProductType.SHELF, ProductType.BOOKCASE}:
         suggested_height = 1650 + max(0, (1.0 / max(aspect, 0.35) - 1.0) * 180)
         return 900.0, round(suggested_height, 1), 300.0
+
+    if category in {ProductType.NIGHTSTAND, ProductType.DRESSER}:
+        suggested_height = 900 + max(0, (1.0 / max(aspect, 0.45) - 1.0) * 90)
+        return 700.0, round(suggested_height, 1), 450.0
 
     suggested_height = 1200 + max(0, (1.0 / max(aspect, 0.4) - 1.0) * 120)
     return 800.0, round(suggested_height, 1), 450.0
 
 
-def fallback_type_from_aspect(image: Image.Image) -> ProductType:
-    width_px, height_px = image.size
-    aspect = width_px / max(height_px, 1)
-    if aspect >= 1.22:
-        return ProductType.DESK
-    if aspect <= 0.72:
-        return ProductType.SHELF
-    return ProductType.CABINET
+def product_type_from_label(label: str) -> ProductType | None:
+    canonical = PRODUCT_TYPE_ALIASES.get(normalize_component_name(label))
+    if canonical is None:
+        return None
+    try:
+        return ProductType(canonical)
+    except ValueError:
+        return None
+
+
+def infer_type_from_components(component_counts: Counter[str]) -> ProductType | None:
+    if not component_counts:
+        return None
+
+    best_name: str | None = None
+    best_score = -1.0
+
+    for candidate, hints in PRODUCT_TYPE_COMPONENT_HINTS.items():
+        if not hints:
+            continue
+        present_hints = [hint for hint in hints if component_counts.get(hint, 0) > 0]
+        coverage = len(present_hints) / len(hints)
+        # Cap each hint contribution to reduce over-bias from repeated shelves/drawers.
+        density = sum(min(2, component_counts.get(hint, 0)) for hint in hints) / (2 * len(hints))
+        score = (0.7 * coverage) + (0.3 * density)
+        if score > best_score:
+            best_name = candidate
+            best_score = score
+
+    if best_name is None or best_score <= 0:
+        return None
+
+    # Disambiguate drawer-centric classes that share similar signatures.
+    if best_name in {"nightstand", "dresser"}:
+        if component_counts.get("drawer_front", 0) >= 3 or component_counts.get("drawer_box", 0) >= 3:
+            best_name = "dresser"
+
+    # Disambiguate open-front storage: prefer shelf/bookcase when cabinet-like hardware is absent.
+    door_hardware_absent = (
+        component_counts.get("door_panel", 0) == 0
+        and component_counts.get("hinge", 0) == 0
+        and component_counts.get("sliding_door_track", 0) == 0
+    )
+    if best_name in {"cabinet", "wardrobe", "sideboard", "tv_stand"} and door_hardware_absent:
+        if component_counts.get("shelf_panel", 0) >= 2 and component_counts.get("side_panel", 0) >= 2:
+            best_name = "bookcase" if component_counts.get("back_panel", 0) > 0 else "shelf"
+
+    try:
+        return ProductType(best_name)
+    except ValueError:
+        return None
+
+
+def minimum_components_for_type(detected_type: ProductType) -> list[Component]:
+    minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
+    return [
+        Component(
+            id=component_id(name),
+            name=name,
+            kind=component_kind(name),
+            quantity=max(1, int(quantity)),
+        )
+        for name, quantity in sorted(minimums.items())
+    ]
 
 
 def normalize_component_name(label: str) -> str:
@@ -85,39 +150,79 @@ def component_kind(label: str) -> ComponentKind:
     normalized = canonical_component_name(label)
     if any(token in normalized for token in ("slide", "hinge", "handle_pull", "bracket", "track")):
         return ComponentKind.HARDWARE
-    if any(token in normalized for token in ("panel", "door", "shelf", "top", "bottom", "back", "side")):
+    if any(token in normalized for token in ("panel", "door", "shelf", "top", "bottom", "back", "side", "drawer")):
         return ComponentKind.PANEL
-    if any(token in normalized for token in ("leg", "support", "brace", "apron", "rail")):
+    if any(token in normalized for token in ("leg", "support", "brace", "apron", "rail", "rod")):
         return ComponentKind.SUPPORT
     return ComponentKind.ASSEMBLY
 
 
-def template_components_for_type(detected_type: ProductType) -> list[Component]:
-    if detected_type == ProductType.DESK:
-        return [
-            Component(id=component_id("top_panel"), name="top_panel", kind=ComponentKind.PANEL, quantity=1),
-            Component(id=component_id("left_leg"), name="left_leg", kind=ComponentKind.SUPPORT, quantity=1, position_label="left"),
-            Component(id=component_id("right_leg"), name="right_leg", kind=ComponentKind.SUPPORT, quantity=1, position_label="right"),
-            Component(id=component_id("front_apron"), name="front_apron", kind=ComponentKind.SUPPORT, quantity=1),
-        ]
-    if detected_type == ProductType.SHELF:
-        return [
-            Component(id=component_id("left_side_panel"), name="left_side_panel", kind=ComponentKind.PANEL, quantity=1, position_label="left"),
-            Component(id=component_id("right_side_panel"), name="right_side_panel", kind=ComponentKind.PANEL, quantity=1, position_label="right"),
-            Component(id=component_id("top_panel"), name="top_panel", kind=ComponentKind.PANEL, quantity=1, position_label="top"),
-            Component(id=component_id("bottom_panel"), name="bottom_panel", kind=ComponentKind.PANEL, quantity=1, position_label="bottom"),
-            Component(id=component_id("shelf_panel"), name="shelf_panel", kind=ComponentKind.PANEL, quantity=3),
-            Component(id=component_id("back_panel"), name="back_panel", kind=ComponentKind.PANEL, quantity=1, position_label="back"),
-        ]
-    return [
-        Component(id=component_id("left_side_panel"), name="left_side_panel", kind=ComponentKind.PANEL, quantity=1, position_label="left"),
-        Component(id=component_id("right_side_panel"), name="right_side_panel", kind=ComponentKind.PANEL, quantity=1, position_label="right"),
-        Component(id=component_id("top_panel"), name="top_panel", kind=ComponentKind.PANEL, quantity=1, position_label="top"),
-        Component(id=component_id("bottom_panel"), name="bottom_panel", kind=ComponentKind.PANEL, quantity=1, position_label="bottom"),
-        Component(id=component_id("back_panel"), name="back_panel", kind=ComponentKind.PANEL, quantity=1, position_label="back"),
-        Component(id=component_id("left_door_panel"), name="left_door_panel", kind=ComponentKind.PANEL, quantity=1, position_label="left"),
-        Component(id=component_id("right_door_panel"), name="right_door_panel", kind=ComponentKind.PANEL, quantity=1, position_label="right"),
-    ]
+def geometry_relabel_component_name(name: str, det: dict) -> str:
+    box = det.get("box")
+    if not isinstance(box, (tuple, list)) or len(box) != 4:
+        return name
+
+    image_w = det.get("image_width_px")
+    image_h = det.get("image_height_px")
+    if not isinstance(image_w, (int, float)) or not isinstance(image_h, (int, float)):
+        return name
+    if image_w <= 1 or image_h <= 1:
+        return name
+
+    x1, y1, x2, y2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    width_ratio = bw / float(image_w)
+    height_ratio = bh / float(image_h)
+    x_center_ratio = ((x1 + x2) / 2.0) / float(image_w)
+    y_center_ratio = ((y1 + y2) / 2.0) / float(image_h)
+    vertical_aspect = bh / bw
+    area_ratio = float(det.get("mask_fill_ratio", width_ratio * height_ratio))
+    score = float(det.get("score", 0.0))
+
+    panel_family = {
+        "side_panel",
+        "shelf_panel",
+        "back_panel",
+        "top_panel",
+        "bottom_panel",
+        "door_panel",
+        "cabinet_body",
+        "bookcase_body",
+    }
+    if name not in panel_family:
+        return name
+
+    if name == "door_panel" and score >= 0.35:
+        return name
+
+    # Preserve high-confidence explicit panel classes unless geometry is very obvious.
+    trust_model = name in {"side_panel", "shelf_panel", "back_panel", "top_panel", "bottom_panel", "door_panel"} and score >= 0.75
+
+    is_left_or_right_edge = x_center_ratio <= 0.22 or x_center_ratio >= 0.78
+    strong_side = vertical_aspect >= 1.4 and width_ratio <= 0.24 and is_left_or_right_edge
+    if strong_side and (not trust_model or name != "side_panel"):
+        return "side_panel"
+
+    strong_horizontal = vertical_aspect <= 0.45 and width_ratio >= 0.40
+    if strong_horizontal and (not trust_model or name not in {"top_panel", "bottom_panel", "shelf_panel"}):
+        if y_center_ratio <= 0.12:
+            return "top_panel"
+        if y_center_ratio >= 0.88:
+            return "bottom_panel"
+        return "shelf_panel"
+
+    strong_back = (
+        width_ratio >= 0.55
+        and height_ratio >= 0.55
+        and area_ratio >= 0.25
+        and 0.20 <= x_center_ratio <= 0.80
+        and 0.20 <= y_center_ratio <= 0.80
+    )
+    if strong_back and (not trust_model or name != "back_panel"):
+        return "back_panel"
+
+    return name
 
 
 def merge_component_sets(primary: list[Component], fallback: list[Component]) -> list[Component]:
@@ -140,7 +245,19 @@ def is_only_product_class_components(components: list[Component]) -> bool:
     if not components:
         return True
     names = {component.name for component in components}
-    return names.issubset({"cabinet_body", "desk_frame", "shelf_panel"})
+    return names.issubset(
+        {
+            "cabinet_body",
+            "desk_frame",
+            "shelf_panel",
+            "table_top",
+            "dresser_body",
+            "nightstand_body",
+            "bookcase_body",
+            "tv_stand_body",
+            "sideboard_body",
+        }
+    )
 
 
 def components_from_detections(
@@ -159,22 +276,55 @@ def components_from_detections(
         
         label = labels[class_id]
         name = canonical_component_name(label)
-        kind = component_kind(label)
-        box = det["box"] # [xc, yc, w, h] or [x1, y1, x2, y2] depends on export
+        name = geometry_relabel_component_name(name, det)
+        kind = component_kind(name)
+        box = det["box"] # [x1, y1, x2, y2]
+        track_id = det.get("track_id")
         
         valid_detections.append({
             "name": name,
             "kind": kind,
             "box": box,
-            "score": score
+            "score": score,
+            "track_id": track_id,
         })
 
     if not valid_detections:
-        return template_components_for_type(detected_type)
+        return minimum_components_for_type(detected_type)
 
-    # 2. Aggregate by canonical component name and count quantity.
-    by_name: dict[str, dict] = {}
+    # 2. Stabilize per-track class jitter by selecting one dominant label per track.
+    non_tracked: list[dict] = []
+    track_scores: dict[int, dict[str, float]] = {}
+    track_best_by_name: dict[int, dict[str, dict]] = {}
+
     for det in valid_detections:
+        track_id = det.get("track_id")
+        if not isinstance(track_id, int):
+            non_tracked.append(det)
+            continue
+
+        name = str(det["name"])
+        score = float(det["score"])
+        score_bucket = track_scores.setdefault(track_id, {})
+        score_bucket[name] = score_bucket.get(name, 0.0) + score
+
+        best_by_name = track_best_by_name.setdefault(track_id, {})
+        current_best = best_by_name.get(name)
+        if current_best is None or score > float(current_best.get("score", 0.0)):
+            best_by_name[name] = det
+
+    stabilized: list[dict] = list(non_tracked)
+    for track_id, scores in track_scores.items():
+        if not scores:
+            continue
+        winner_name = max(scores, key=scores.get)
+        winner = track_best_by_name.get(track_id, {}).get(winner_name)
+        if winner is not None:
+            stabilized.append(winner)
+
+    # 3. Aggregate by canonical component name and count quantity.
+    by_name: dict[str, dict] = {}
+    for det in stabilized:
         name = det["name"]
         current = by_name.get(name)
         if current is None:
@@ -182,9 +332,14 @@ def components_from_detections(
                 "kind": det["kind"],
                 "quantity": 1,
                 "box": det["box"],
+                "best_score": det["score"],
             }
         else:
             current["quantity"] += 1
+
+            if det["score"] > current["best_score"]:
+                current["best_score"] = det["score"]
+                current["box"] = det["box"]
 
     components = [
         Component(
@@ -197,12 +352,9 @@ def components_from_detections(
         for name, entry in sorted(by_name.items())
     ]
 
-    # 3. Template merge for critical structural completeness.
-    template = template_components_for_type(detected_type)
-    existing_names = set(by_name)
-    for t_comp in template:
-        if t_comp.name not in existing_names:
-            components.append(t_comp)
+    # 4. Taxonomy prior merge only when detections are too sparse.
+    if is_only_product_class_components(components):
+        components = merge_component_sets(components, minimum_components_for_type(detected_type))
 
     return components
 
@@ -380,30 +532,33 @@ def build_hardware(joints: list[JointEvidence], uncertain_hardware: bool) -> lis
 
 
 def estimate_dimensions_multi(evidence: list[ImageEvidence]) -> tuple[float, float, float]:
-    from statistics import mean
-    
     widths: list[float] = []
     heights: list[float] = []
     depths: list[float] = []
-    
+
     for item in evidence:
         aspect = item.width_px / max(item.height_px, 1)
-        if item.detected_type == "desk":
+        if item.detected_type in {ProductType.DESK, ProductType.TABLE}:
             w = 1200 + max(0, (aspect - 1.2) * 220)
             widths.append(w)
             heights.append(750.0)
             depths.append(600.0)
-        elif item.detected_type == "shelf":
+        elif item.detected_type in {ProductType.SHELF, ProductType.BOOKCASE}:
             h = 1650 + max(0, (1.0 / max(aspect, 0.35) - 1.0) * 180)
             widths.append(900.0)
             heights.append(h)
             depths.append(300.0)
+        elif item.detected_type in {ProductType.NIGHTSTAND, ProductType.DRESSER}:
+            h = 900 + max(0, (1.0 / max(aspect, 0.45) - 1.0) * 90)
+            widths.append(700.0)
+            heights.append(h)
+            depths.append(450.0)
         else:
             h = 1200 + max(0, (1.0 / max(aspect, 0.4) - 1.0) * 120)
             widths.append(800.0)
             heights.append(h)
             depths.append(450.0)
-            
+
     return (
         round(mean(widths or [800]), 1),
         round(mean(heights or [1200]), 1),
@@ -423,18 +578,45 @@ def assemble_project(
     for item in evidence:
         all_detections.extend(item.raw_detections)
 
-    # Determine project-wide product type
-    scores_by_type: dict[str, float] = {}
+    # Determine project-wide product type using multiple evidence sources.
+    scores_by_type: dict[ProductType, float] = {}
     for item in evidence:
         scores_by_type[item.detected_type] = scores_by_type.get(item.detected_type, 0.0) + item.confidence
 
+    component_counts: Counter[str] = Counter()
+    for det in all_detections:
+        class_id = det.get("class_id", -1)
+        score = float(det.get("score", 0.0))
+        if not isinstance(class_id, int) or class_id < 0 or class_id >= len(labels):
+            continue
+
+        label = labels[class_id]
+        label_type = product_type_from_label(label)
+        if label_type is not None:
+            # Keep class-head logits useful but secondary to image-level votes.
+            scores_by_type[label_type] = scores_by_type.get(label_type, 0.0) + (score * 0.5)
+            continue
+
+        component_counts[canonical_component_name(label)] += 1
+
+    inferred_component_type = infer_type_from_components(component_counts)
+    if inferred_component_type is not None:
+        support = float(sum(component_counts.values()))
+        boost = min(1.2, 0.4 + (0.1 * support))
+        scores_by_type[inferred_component_type] = scores_by_type.get(inferred_component_type, 0.0) + boost
+
     detected_type = ProductType(max(scores_by_type, key=scores_by_type.get))
     confidence = min(1.0, scores_by_type[detected_type] / len(evidence))
-    if confidence < threshold:
+    effective_threshold = threshold * PRODUCT_TYPE_CONFIDENCE_MULTIPLIERS.get(detected_type.value, 1.0)
+    if confidence < effective_threshold:
         avg_aspect = mean(item.width_px / max(item.height_px, 1) for item in evidence)
-        if avg_aspect >= 1.22:
+        if avg_aspect >= 1.45:
+            detected_type = ProductType.TABLE
+        elif avg_aspect >= 1.15:
             detected_type = ProductType.DESK
-        elif avg_aspect <= 0.72:
+        elif avg_aspect <= 0.45:
+            detected_type = ProductType.BOOKCASE
+        elif avg_aspect <= 0.78:
             detected_type = ProductType.SHELF
         else:
             detected_type = ProductType.CABINET

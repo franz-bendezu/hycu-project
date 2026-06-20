@@ -4,6 +4,7 @@ pydantic==2.7.4
 Pillow==10.4.0
 httpx==0.27.0
 numpy==1.26.4
+PyYAML==6.0.2
 # Use the GPU-accelerated ONNX Runtime if available, otherwise fall back to CPU
 # onnxruntime-gpu==1.18.1
 onnxruntime==1.18.1

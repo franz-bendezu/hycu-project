@@ -1,0 +1,57 @@
+product_type_aliases:
+  cabinet: cabinet
+  wardrobe: wardrobe
+  closet: wardrobe
+  armoire: wardrobe
+  bookcase: bookcase
+  shelf: shelf
+  shelving: shelf
+  desk: desk
+  writing_desk: desk
+  office_desk: desk
+  table: table
+  nightstand: nightstand
+  bedside_table: nightstand
+  dresser: dresser
+  drawer_chest: dresser
+  sideboard: sideboard
+  tv_stand: tv_stand
+  kitchen_cabinet: cabinet
+
+product_type_component_hints:
+  cabinet: [door_panel, side_panel, back_panel, shelf_panel]
+  wardrobe: [door_panel, side_panel, hanger_rod, shelf_panel]
+  bookcase: [shelf_panel, side_panel, back_panel]
+  shelf: [shelf_panel, side_panel, back_panel]
+  desk: [top_panel, leg, front_apron]
+  table: [top_panel, leg]
+  nightstand: [drawer_front, drawer_box, top_panel]
+  dresser: [drawer_front, drawer_box, top_panel]
+  sideboard: [door_panel, drawer_front, side_panel]
+  tv_stand: [door_panel, shelf_panel, top_panel]
+
+product_type_component_minimums:
+  cabinet: {side_panel: 2, top_panel: 1, bottom_panel: 1, back_panel: 1}
+  wardrobe: {side_panel: 2, top_panel: 1, bottom_panel: 1, back_panel: 1, door_panel: 2}
+  bookcase: {side_panel: 2, top_panel: 1, bottom_panel: 1, shelf_panel: 3, back_panel: 1}
+  shelf: {side_panel: 2, top_panel: 1, bottom_panel: 1, shelf_panel: 2}
+  desk: {top_panel: 1, leg: 2, front_apron: 1}
+  table: {top_panel: 1, leg: 4}
+  nightstand: {side_panel: 2, top_panel: 1, bottom_panel: 1, drawer_front: 1}
+  dresser: {side_panel: 2, top_panel: 1, bottom_panel: 1, drawer_front: 3}
+  sideboard: {side_panel: 2, top_panel: 1, bottom_panel: 1, door_panel: 2}
+  tv_stand: {side_panel: 2, top_panel: 1, bottom_panel: 1, shelf_panel: 1}
+
+# Multipliers applied to global threshold in assemble_project:
+# effective_threshold = global_threshold * multiplier
+product_type_confidence_multipliers:
+  cabinet: 1.0
+  wardrobe: 0.9
+  bookcase: 0.9
+  shelf: 1.0
+  desk: 1.0
+  table: 1.0
+  nightstand: 0.9
+  dresser: 0.9
+  sideboard: 0.9
+  tv_stand: 0.9

@@ -84,6 +84,8 @@ def health() -> dict:
 
 @app.post("/infer", response_model=InferResponse)
 def infer(payload: InferRequest) -> InferResponse:
+    from app.services.processor import assemble_project
+
     images_with_urls = load_all_images(payload.image_urls)
 
     # Stage 1: Object Detection
@@ -107,9 +109,13 @@ def infer(payload: InferRequest) -> InferResponse:
         masks = segmenter.predict(image, boxes) if boxes else []
 
         for det_idx, item in enumerate(tracked):
+            item.setdefault("image_width_px", image.width)
+            item.setdefault("image_height_px", image.height)
             if det_idx < len(masks):
-                item["mask_area_px"] = int(masks[det_idx].sum())
+                mask_area = int(masks[det_idx].sum())
+                item["mask_area_px"] = mask_area
+                item["mask_fill_ratio"] = round(mask_area / max(image.width * image.height, 1), 5)
 
         evidence.raw_detections = tracked
 
-    return detection_result
+    return assemble_project(detection_result.evidence, detector.labels, detector.score_threshold)

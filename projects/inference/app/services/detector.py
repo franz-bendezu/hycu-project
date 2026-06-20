@@ -7,7 +7,7 @@ import numpy as np
 import onnxruntime as ort  # type: ignore[import-not-found]
 from PIL import Image
 
-from app.core.config import get_image_size_fallback, get_execution_providers
+from app.core.config import PRODUCT_TYPE_ALIASES, get_image_size_fallback, get_execution_providers
 from app.utils.image import nms, preprocess
 
 from app.schemas import ImageEvidence, InferResponse, ProductType
@@ -40,6 +40,36 @@ class YoloDetector:
         self.model_path = model_path
         self.score_threshold = score_threshold
         self.active_providers = self._session.get_providers()
+
+    @staticmethod
+    def _normalize_label(label: str) -> str:
+        return "_".join(label.strip().lower().replace("-", " ").split())
+
+    def _label_to_product_type(self, label: str) -> ProductType | None:
+        normalized = self._normalize_label(label)
+        mapped = PRODUCT_TYPE_ALIASES.get(normalized)
+        if mapped is None:
+            return None
+        try:
+            return ProductType(mapped)
+        except ValueError:
+            return None
+
+    def _resolve_detected_type(self, detections: list[dict]) -> ProductType:
+        scores_by_type: dict[ProductType, float] = {}
+        for det in detections:
+            class_id = int(det.get("class_id", -1))
+            if class_id < 0 or class_id >= len(self.labels):
+                continue
+            product_type = self._label_to_product_type(self.labels[class_id])
+            if product_type is None:
+                continue
+            score = float(det.get("score", 0.0))
+            scores_by_type[product_type] = max(scores_by_type.get(product_type, 0.0), score)
+
+        if scores_by_type:
+            return max(scores_by_type, key=scores_by_type.get)
+        return ProductType.CABINET
 
     def _resolve_input_size(self, shape: list[int | str | None]) -> tuple[int, int]:
         if len(shape) != 4:
@@ -86,20 +116,16 @@ class YoloDetector:
                     ),
                     "score": d["score"],
                     "class_id": d["class_id"],
-                    "label": self.labels[d["class_id"]] if d["class_id"] < len(self.labels) else "unknown"
+                    "label": self.labels[d["class_id"]] if d["class_id"] < len(self.labels) else "unknown",
+                    "image_width_px": orig_w,
+                    "image_height_px": orig_h,
                 })
 
             # Resolved confidence and type for this image
             if scaled_detections:
                 best_det = max(scaled_detections, key=lambda x: x["score"])
                 confidence = best_det["score"]
-                # Resolve product type
-                product_types = tuple(item.value for item in ProductType)
-                prod_dets = [d for d in scaled_detections if d["label"] in product_types]
-                if prod_dets:
-                    detected_type = ProductType(max(prod_dets, key=lambda x: x["score"])["label"])
-                else:
-                    detected_type = ProductType.CABINET
+                detected_type = self._resolve_detected_type(scaled_detections)
             else:
                 confidence = 0.0
                 detected_type = ProductType.CABINET
@@ -116,36 +142,6 @@ class YoloDetector:
             )
 
         return assemble_project(evidence_list, self.labels, self.score_threshold)
-
-    def _decode_prediction(self, outputs: list[np.ndarray], labels: tuple[str, ...]) -> tuple[ProductType, float, list[dict]]:
-        # This method is now partially bypassed by the logic in analyze() 
-        # but kept for backward compatibility if needed internally
-        detections = self._extract_detections(outputs[0], len(labels))
-        if not detections:
-            return ProductType.CABINET, 0.0, []
-
-        category_scores: dict[str, float] = {label: 0.0 for label in labels}
-        for det in detections:
-            class_id = det["class_id"]
-            score = det["score"]
-            if class_id < 0 or class_id >= len(labels):
-                continue
-            category = labels[class_id]
-            category_scores[category] = max(category_scores[category], score)
-
-        # Better product type resolution: prefer top-level structure classes
-        product_type_values = tuple(item.value for item in ProductType)
-        product_scores = {k: v for k, v in category_scores.items() if k in product_type_values}
-        
-        if any(product_scores.values()):
-            best_category = ProductType(max(product_scores, key=product_scores.get))
-            best_score = product_scores[best_category]
-        else:
-            # Keep a deterministic fallback and let the assembler handle refinement.
-            best_category = ProductType.CABINET
-            best_score = max(category_scores.values()) if category_scores else 0.0
-
-        return best_category, round(float(best_score), 3), detections
 
     def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[dict]:
         tensor = np.array(output)
