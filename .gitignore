@@ -29,3 +29,10 @@ Thumbs.db
 
 # General
 /.venv/
+
+# Local report/build/debug outputs
+docs/*
+!docs/PAPER.md
+!docs/SLIDES.md
+output/
+projects/inference/debug/

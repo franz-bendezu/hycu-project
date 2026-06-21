@@ -1,0 +1,4 @@
+detected_width,detected_height,detected_depth,confidence,shelf_count,target_width,target_height,target_depth
+780,1180,445,0.91,3,800,1200,450
+940,1780,398,0.89,4,960,1800,400
+590,1980,295,0.94,5,600,2000,300
