@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib import import_module
 
 from app.presentation.schemas.project_design import (
@@ -85,13 +85,6 @@ def _safe_float(value: object, default: float) -> float:
         return default
 
 
-def _safe_int(value: object, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(value, maximum))
 
@@ -112,93 +105,6 @@ def _normalize_type(raw: object, fallback: str) -> str:
     }:
         return text
     return fallback
-
-
-def _infer_type_from_components(components: list[dict]) -> str | None:
-    names = {
-        str(component.get("name", "")).strip().lower()
-        for component in components
-        if isinstance(component, dict)
-    }
-    has_door_or_drawer = any("door" in name for name in names) or any("drawer" in name for name in names)
-    has_storage_frame = any(name in {"side_panel", "back_panel", "bottom_panel", "top_panel"} for name in names)
-    has_desk_surface = any(name in {"desktop", "table_top", "desk_frame"} for name in names)
-    has_leg = any("leg" in name for name in names)
-
-    # front_apron alone is ambiguous; require a stronger desk cue.
-    if has_desk_surface or ("front_apron" in names and has_leg):
-        return "desk"
-    if has_door_or_drawer or has_storage_frame:
-        return "cabinet"
-    if "shelf_panel" in names and not any("door" in name for name in names):
-        return "shelf"
-    return None
-
-
-def _extract_image_size(result: dict) -> tuple[float, float]:
-    image_results = result.get("image_results")
-    if isinstance(image_results, list) and image_results:
-        first = image_results[0]
-        if isinstance(first, dict):
-            w = _safe_float(first.get("width_px"), 1.0)
-            h = _safe_float(first.get("height_px"), 1.0)
-            return max(w, 1.0), max(h, 1.0)
-    return 1.0, 1.0
-
-
-def _component_size_mm(
-    component: dict,
-    *,
-    kind: ComponentKind,
-    image_w_px: float,
-    image_h_px: float,
-    target_w_mm: float,
-    target_h_mm: float,
-    target_d_mm: float,
-    material_thickness: float,
-) -> tuple[float, float, float]:
-    box = component.get("box_corners")
-    if isinstance(box, (list, tuple)) and len(box) == 4:
-        x1 = _safe_float(box[0], 0.0)
-        y1 = _safe_float(box[1], 0.0)
-        x2 = _safe_float(box[2], 0.0)
-        y2 = _safe_float(box[3], 0.0)
-        bw = abs(x2 - x1)
-        bh = abs(y2 - y1)
-        if bw > 0 and bh > 0:
-            width_mm = max((bw / image_w_px) * target_w_mm, material_thickness)
-            height_mm = max((bh / image_h_px) * target_h_mm, material_thickness)
-            depth_mm = max(target_d_mm * 0.15, material_thickness)
-            return round(width_mm, 2), round(height_mm, 2), round(depth_mm, 2)
-
-    # Kind-aware priors are used when no bounding box evidence is available.
-    if kind == ComponentKind.TOP_PANEL:
-        return round(target_w_mm, 2), round(material_thickness, 2), round(target_d_mm, 2)
-    if kind == ComponentKind.BOTTOM_PANEL:
-        return round(target_w_mm, 2), round(material_thickness, 2), round(target_d_mm, 2)
-    if kind == ComponentKind.BACK_PANEL:
-        return round(target_w_mm * 0.95, 2), round(target_h_mm * 0.92, 2), round(material_thickness, 2)
-    if kind in {ComponentKind.LEFT_SIDE, ComponentKind.RIGHT_SIDE}:
-        return round(material_thickness, 2), round(target_h_mm * 0.92, 2), round(target_d_mm * 0.92, 2)
-    if kind == ComponentKind.DIVIDER_PANEL:
-        return round(material_thickness, 2), round(target_h_mm * 0.78, 2), round(target_d_mm * 0.9, 2)
-    if kind in {ComponentKind.FRONT_PANEL, ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT}:
-        return round(target_w_mm * 0.22, 2), round(target_h_mm * 0.14, 2), round(material_thickness, 2)
-    if kind == ComponentKind.SHELF:
-        return round(target_w_mm * 0.46, 2), round(material_thickness, 2), round(target_d_mm * 0.85, 2)
-    if kind in {
-        ComponentKind.LEFT_LEG_FRONT,
-        ComponentKind.RIGHT_LEG_FRONT,
-        ComponentKind.LEFT_LEG_BACK,
-        ComponentKind.RIGHT_LEG_BACK,
-    }:
-        return round(material_thickness * 2, 2), round(target_h_mm * 0.92, 2), round(material_thickness * 2, 2)
-
-    return (
-        round(max(target_w_mm * 0.25, material_thickness * 2), 2),
-        round(max(target_h_mm * 0.25, material_thickness * 2), 2),
-        round(max(target_d_mm * 0.15, material_thickness), 2),
-    )
 
 
 def _as_iterable(value: object) -> Iterable[dict]:
@@ -662,12 +568,13 @@ def _ensure_side_support_pair(
         components.append(create_side(ComponentKind.RIGHT_SIDE))
 
 
-def build_project_model_from_inference(
+def _build_project_model_from_inference(
     inference: InferenceOutput,
     *,
     project_name: str,
     fallback_type: str = "cabinet",
     material_thickness: float = 18.0,
+    assign_component_transforms: Callable[[ProductSpec, list[Component], list[JointSpec]], None] = _assign_component_transforms,
 ) -> ProjectModel:
     source_components = [component.model_dump(mode="json") for component in inference.components]
     source_faces = [face.model_dump(mode="json") for face in inference.faces]
@@ -875,7 +782,7 @@ def build_project_model_from_inference(
         product=product,
     )
 
-    _assign_component_transforms(product=product, components=components, joints=joints)
+    assign_component_transforms(product=product, components=components, joints=joints)
 
     return ProjectModel(
         product=product,
@@ -885,4 +792,46 @@ def build_project_model_from_inference(
         joints=joints,
         features=[],
         warnings=warnings,
+    )
+
+
+class VisionModelBuilder:
+    def __init__(
+        self,
+        assign_component_transforms: Callable[[ProductSpec, list[Component], list[JointSpec]], None] = _assign_component_transforms,
+    ) -> None:
+        self._assign_component_transforms = assign_component_transforms
+
+    def build_project_model_from_inference(
+        self,
+        inference: InferenceOutput,
+        *,
+        project_name: str,
+        fallback_type: str = "cabinet",
+        material_thickness: float = 18.0,
+    ) -> ProjectModel:
+        return _build_project_model_from_inference(
+            inference,
+            project_name=project_name,
+            fallback_type=fallback_type,
+            material_thickness=material_thickness,
+            assign_component_transforms=self._assign_component_transforms,
+        )
+
+
+_default_vision_model_builder = VisionModelBuilder()
+
+
+def build_project_model_from_inference(
+    inference: InferenceOutput,
+    *,
+    project_name: str,
+    fallback_type: str = "cabinet",
+    material_thickness: float = 18.0,
+) -> ProjectModel:
+    return _default_vision_model_builder.build_project_model_from_inference(
+        inference,
+        project_name=project_name,
+        fallback_type=fallback_type,
+        material_thickness=material_thickness,
     )
