@@ -4,6 +4,7 @@ import uuid
 from importlib import import_module
 
 from app.domain import ComponentSpec, HardwareSpec, ProductSpec, ProjectDesign
+from app.domain.services.product_types import PROFILE_PRODUCT_TYPES, generator_profile_for_inferred_type
 from app.presentation.schemas.project_design import (
     ComponentCategory,
     ComponentKind,
@@ -202,10 +203,11 @@ class ModelGenerator:
         return self._build_cabinet_components(spec)
 
     def _profile_for_spec(self, spec: ProductSpec) -> str:
-        profile = (getattr(spec, "inferred_type", "") or "").strip().lower()
-        if profile in {"cabinet", "desk", "shelf"}:
+        profile = generator_profile_for_inferred_type(getattr(spec, "inferred_type", ""))
+        if profile is not None:
             return profile
-        raise ValueError("Product spec must include inferred_type in {'cabinet','desk','shelf'}")
+        supported = ",".join(f"'{name}'" for name in PROFILE_PRODUCT_TYPES)
+        raise ValueError(f"Product spec must include inferred_type in {{{supported}}}")
 
     def _build_cabinet_components(self, spec: ProductSpec) -> list[ComponentSpec]:
         inner_width = spec.target_width - (2 * spec.material_thickness)

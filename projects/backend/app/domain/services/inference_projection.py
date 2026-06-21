@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.domain.services.product_types import normalize_detected_product_type, shelf_default_for_type
 from app.presentation.schemas.project_design import ProjectModel
 
 
@@ -25,170 +26,6 @@ class InferenceProjectionService:
         return total
 
     @staticmethod
-    def component_quantity_by_tokens(result: dict, tokens: tuple[str, ...]) -> int:
-        components = result.get("components")
-        if not isinstance(components, list):
-            return 0
-
-        total = 0
-        for component in components:
-            if not isinstance(component, dict):
-                continue
-            name = str(component.get("name", "")).strip().lower()
-            if not name or not any(token in name for token in tokens):
-                continue
-            try:
-                qty = int(component.get("quantity", 0))
-            except (TypeError, ValueError):
-                qty = 0
-            total += max(qty, 0)
-
-        return total
-
-    @staticmethod
-    def raw_detection_count_by_tokens(result: dict, tokens: tuple[str, ...]) -> int:
-        image_results = result.get("image_results")
-        if not isinstance(image_results, list):
-            return 0
-
-        count = 0
-        for evidence in image_results:
-            if not isinstance(evidence, dict):
-                continue
-            raw_detections = evidence.get("raw_detections")
-            if not isinstance(raw_detections, list):
-                continue
-            for detection in raw_detections:
-                if not isinstance(detection, dict):
-                    continue
-                label = str(detection.get("label", "")).strip().lower()
-                if label and any(token in label for token in tokens):
-                    count += 1
-
-        return count
-
-    @classmethod
-    def facade_counts_from_inference(cls, result: dict) -> tuple[int, int]:
-        door_tokens = ("door", "wardrobe", "porta")
-        drawer_tokens = ("drawer", "gaveta", "gavetete")
-        generic_front_tokens = ("front_panel", "frontpanel", "facade", "frente", "panel_front")
-
-        door_count = cls.component_quantity_by_tokens(result, door_tokens)
-        drawer_count = cls.component_quantity_by_tokens(result, drawer_tokens)
-        generic_front_count = cls.component_quantity_by_tokens(result, generic_front_tokens)
-
-        if door_count == 0:
-            door_count = cls.raw_detection_count_by_tokens(result, door_tokens)
-        if drawer_count == 0:
-            drawer_count = cls.raw_detection_count_by_tokens(result, drawer_tokens)
-        if generic_front_count == 0:
-            generic_front_count = cls.raw_detection_count_by_tokens(result, generic_front_tokens)
-
-        explicit_total = door_count + drawer_count
-        if generic_front_count > explicit_total:
-            remaining = generic_front_count - explicit_total
-            if drawer_count == 0 and generic_front_count >= 4:
-                drawer_count = 1
-                remaining = max(generic_front_count - (door_count + drawer_count), 0)
-            door_count += remaining
-
-        return min(max(door_count, 0), 8), min(max(drawer_count, 0), 8)
-
-    @classmethod
-    def facade_evidence_from_inference(cls, result: dict) -> dict[str, int]:
-        door_tokens = ("door", "wardrobe", "porta")
-        drawer_tokens = ("drawer", "gaveta", "gavetete")
-        generic_front_tokens = ("front_panel", "frontpanel", "facade", "frente", "panel_front")
-
-        explicit_door_count = cls.component_quantity_by_tokens(result, door_tokens)
-        explicit_drawer_count = cls.component_quantity_by_tokens(result, drawer_tokens)
-        generic_front_count = cls.component_quantity_by_tokens(result, generic_front_tokens)
-
-        raw_door_count = cls.raw_detection_count_by_tokens(result, door_tokens)
-        raw_drawer_count = cls.raw_detection_count_by_tokens(result, drawer_tokens)
-        raw_generic_front_count = cls.raw_detection_count_by_tokens(result, generic_front_tokens)
-
-        return {
-            "explicit_door_count": max(explicit_door_count, 0),
-            "explicit_drawer_count": max(explicit_drawer_count, 0),
-            "generic_front_count": max(generic_front_count, 0),
-            "raw_door_count": max(raw_door_count, 0),
-            "raw_drawer_count": max(raw_drawer_count, 0),
-            "raw_generic_front_count": max(raw_generic_front_count, 0),
-        }
-
-    @classmethod
-    def divider_count_from_inference(
-        cls,
-        result: dict,
-        inferred_type: str,
-        door_count: int,
-        drawer_count: int,
-    ) -> int:
-        divider_tokens = ("divider", "partition", "vertical")
-        divider_count = cls.component_quantity_by_tokens(result, divider_tokens)
-        if divider_count == 0:
-            divider_count = cls.raw_detection_count_by_tokens(result, divider_tokens)
-
-        if divider_count == 0 and inferred_type == "cabinet" and drawer_count == 0 and door_count >= 2:
-            divider_count = max(1, door_count // 2)
-
-        return min(max(divider_count, 0), 6)
-
-    @classmethod
-    def has_divider_evidence(cls, result: dict) -> bool:
-        divider_tokens = ("divider", "partition", "vertical")
-        component_hits = cls.component_quantity_by_tokens(result, divider_tokens)
-        if component_hits > 0:
-            return True
-        return cls.raw_detection_count_by_tokens(result, divider_tokens) > 0
-
-    @staticmethod
-    def normalize_facade_counts(
-        *,
-        inferred_type: str,
-        door_count: int,
-        drawer_count: int,
-        divider_count: int,
-        has_divider_evidence_flag: bool,
-        shelf_count: int,
-        evidence: dict[str, int],
-    ) -> tuple[int, int]:
-        normalized_doors = max(door_count, 0)
-        normalized_drawers = max(drawer_count, 0)
-
-        generic_fronts = max(evidence.get("generic_front_count", 0), 0)
-        raw_generic_fronts = max(evidence.get("raw_generic_front_count", 0), 0)
-
-        if inferred_type == "cabinet" and normalized_drawers == 0:
-            front_signal = max(generic_fronts, raw_generic_fronts)
-            if front_signal >= 4:
-                normalized_drawers = 1
-                normalized_doors = max(normalized_doors, front_signal - 1)
-
-        if (
-            inferred_type == "cabinet"
-            and normalized_doors == 2
-            and normalized_drawers == 0
-            and divider_count >= 1
-            and has_divider_evidence_flag
-            and shelf_count >= 2
-        ):
-            normalized_doors = 3
-            normalized_drawers = 1
-
-        if (
-            inferred_type == "cabinet"
-            and normalized_drawers == 0
-            and normalized_doors >= 4
-            and shelf_count >= 2
-        ):
-            normalized_drawers = 1
-            normalized_doors = max(2, normalized_doors - 1)
-
-        return min(normalized_doors, 8), min(normalized_drawers, 8)
-
-    @staticmethod
     def inferred_type_from_components(result: dict) -> str | None:
         components = result.get("components")
         if not isinstance(components, list):
@@ -202,6 +39,10 @@ class InferenceProjectionService:
 
         if any(name in {"desktop", "front_apron"} for name in names):
             return "desk"
+        if any(name in {"tv_stand_body", "tv_stand"} for name in names):
+            return "tv_stand"
+        if any(name in {"sideboard_body", "sideboard"} for name in names):
+            return "sideboard"
         if any("door" in name for name in names) or any("drawer" in name for name in names):
             return "cabinet"
         if "shelf_panel" in names and not any("door" in name for name in names):
@@ -231,6 +72,10 @@ class InferenceProjectionService:
         if not labels:
             return None
 
+        if any(label in {"tv_stand_body", "tv_stand"} for label in labels):
+            return "tv_stand"
+        if any(label in {"sideboard_body", "sideboard"} for label in labels):
+            return "sideboard"
         if any("drawer" in label for label in labels) or any("door" in label for label in labels):
             return "cabinet"
         if any(label in {"desktop", "front_apron"} for label in labels):
@@ -241,10 +86,7 @@ class InferenceProjectionService:
 
     @staticmethod
     def inferred_type_from_detected_type(detected_type: str | None) -> str | None:
-        normalized = (detected_type or "").strip().lower()
-        if normalized in {"cabinet", "desk", "shelf"}:
-            return normalized
-        return None
+        return normalize_detected_product_type(detected_type)
 
     @classmethod
     def infer_model_type(cls, result: dict, fallback: str | None = None) -> str:
@@ -266,14 +108,7 @@ class InferenceProjectionService:
 
     @staticmethod
     def shelf_count_from_detected_type(detected_type: str | None) -> int:
-        normalized = (detected_type or "").strip().lower()
-        if normalized == "desk":
-            return 0
-        if normalized == "cabinet":
-            return 2
-        if normalized == "shelf":
-            return 4
-        return 0
+        return shelf_default_for_type(detected_type)
 
     @classmethod
     def shelf_count_from_inference(cls, result: dict, inferred_type: str) -> int:

@@ -4,6 +4,10 @@ import uuid
 from collections.abc import Callable, Iterable
 from importlib import import_module
 
+from app.domain.services.product_types import (
+    CABINET_PROFILE_ALIASES,
+    normalize_known_product_type,
+)
 from app.presentation.schemas.project_design import (
     Component,
     ComponentCategory,
@@ -90,19 +94,8 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 
 
 def _normalize_type(raw: object, fallback: str) -> str:
-    text = str(raw or "").strip().lower()
-    if text in {
-        "cabinet",
-        "wardrobe",
-        "bookcase",
-        "desk",
-        "table",
-        "shelf",
-        "nightstand",
-        "dresser",
-        "sideboard",
-        "tv_stand",
-    }:
+    text = normalize_known_product_type(raw)
+    if text is not None:
         return text
     return fallback
 
@@ -513,7 +506,7 @@ def _ensure_side_support_pair(
     target_depth: float,
     material_thickness: float,
 ) -> None:
-    if inferred_type not in {"cabinet", "desk"}:
+    if inferred_type not in {"cabinet", "desk", *CABINET_PROFILE_ALIASES}:
         return
 
     if len(components) < 4:
@@ -593,20 +586,24 @@ def _build_project_model_from_inference(
 
     components: list[Component] = []
     component_by_id: dict[str, Component] = {}
+    source_component_id_to_uuid: dict[str, str] = {}
     for entry in source_components:
-        component_id = str(entry.get("id", "")).strip()
-        if not component_id:
+        source_component_id = str(entry.get("id", "")).strip()
+        if not source_component_id:
             raise ValueError("Inference component is missing 'id'")
         try:
             kind = ComponentKind(str(entry.get("kind", "")).strip().lower())
         except ValueError as exc:
-            raise ValueError(f"Inference component '{component_id}' has invalid kind") from exc
+            raise ValueError(f"Inference component '{source_component_id}' has invalid kind") from exc
 
         width = _safe_float(entry.get("width"), -1.0)
         height = _safe_float(entry.get("height"), -1.0)
         depth = _safe_float(entry.get("depth"), -1.0)
         if width <= 0 or height <= 0 or depth <= 0:
-            raise ValueError(f"Inference component '{component_id}' must include positive width/height/depth")
+            raise ValueError(f"Inference component '{source_component_id}' must include positive width/height/depth")
+
+        component_id = str(uuid.uuid4())
+        source_component_id_to_uuid[source_component_id] = component_id
 
         component = Component(
             id=component_id,
@@ -620,22 +617,29 @@ def _build_project_model_from_inference(
         components.append(component)
         component_by_id[component.id] = component
 
-    face_ids: set[str] = set()
+    source_face_to_uuid: dict[str, str] = {}
     for entry in source_faces:
-        face_id = str(entry.get("id", "")).strip()
-        component_id = str(entry.get("component_id", "")).strip()
+        source_face_id = str(entry.get("id", "")).strip()
+        source_component_id = str(entry.get("component_id", "")).strip()
         normal_raw = str(entry.get("normal", "")).strip().lower()
-        if not face_id or not component_id or not normal_raw:
+        if not source_face_id or not source_component_id or not normal_raw:
             raise ValueError("Inference face must include id, component_id and normal")
+        component_id = source_component_id_to_uuid.get(source_component_id)
+        if component_id is None:
+            raise ValueError(
+                f"Inference face '{source_face_id}' references unknown component '{source_component_id}'"
+            )
         component = component_by_id.get(component_id)
         if component is None:
-            raise ValueError(f"Inference face '{face_id}' references unknown component '{component_id}'")
+            raise ValueError(f"Inference face '{source_face_id}' references unknown component '{source_component_id}'")
         try:
             normal = HardwareMountFace(normal_raw)
         except ValueError as exc:
-            raise ValueError(f"Inference face '{face_id}' has invalid normal '{normal_raw}'") from exc
-        component.faces.append(FaceSpec(id=face_id, component_id=component_id, normal=normal))
-        face_ids.add(face_id)
+            raise ValueError(f"Inference face '{source_face_id}' has invalid normal '{normal_raw}'") from exc
+
+        face_uuid = _face_id(component_id, normal)
+        component.faces.append(FaceSpec(id=face_uuid, component_id=component_id, normal=normal))
+        source_face_to_uuid[source_face_id] = face_uuid
 
     if any(not component.faces for component in components):
         raise ValueError("Each inferred component must include at least one face")
@@ -650,6 +654,7 @@ def _build_project_model_from_inference(
         material_thickness=material_thickness,
     )
 
+    face_index = _face_index(components)
     face_ids = {face.id for component in components for face in component.faces}
 
     door_count = sum(1 for component in components if component.kind == ComponentKind.DOOR_PANEL)
@@ -743,10 +748,27 @@ def _build_project_model_from_inference(
     joints: list[JointSpec] = []
     for entry in source_joints:
         joint_id = str(entry.get("id", "")).strip()
-        parent_face_id = str(entry.get("parent_face_id", "")).strip()
-        child_face_id = str(entry.get("child_face_id", "")).strip()
-        if not joint_id or not parent_face_id or not child_face_id:
+        parent_face_source_id = str(entry.get("parent_face_id", "")).strip()
+        child_face_source_id = str(entry.get("child_face_id", "")).strip()
+        if not joint_id or not parent_face_source_id or not child_face_source_id:
             raise ValueError("Inference joint must include id, parent_face_id and child_face_id")
+
+        parent_face_id = source_face_to_uuid.get(parent_face_source_id)
+        child_face_id = source_face_to_uuid.get(child_face_source_id)
+
+        if parent_face_id is None:
+            parent_component_id = source_component_id_to_uuid.get(_component_id_from_face_id(parent_face_source_id), "")
+            parent_face = _face_from_id(parent_face_source_id)
+            if parent_component_id and parent_face is not None:
+                parent_face_id = face_index.get((parent_component_id, parent_face))
+        if child_face_id is None:
+            child_component_id = source_component_id_to_uuid.get(_component_id_from_face_id(child_face_source_id), "")
+            child_face = _face_from_id(child_face_source_id)
+            if child_component_id and child_face is not None:
+                child_face_id = face_index.get((child_component_id, child_face))
+
+        if parent_face_id is None or child_face_id is None:
+            raise ValueError(f"Inference joint '{joint_id}' references unknown faces")
         if parent_face_id not in face_ids or child_face_id not in face_ids:
             raise ValueError(f"Inference joint '{joint_id}' references unknown faces")
 
@@ -760,7 +782,7 @@ def _build_project_model_from_inference(
 
         joints.append(
             JointSpec(
-                id=joint_id,
+                id=str(uuid.uuid4()),
                 parent_face_id=parent_face_id,
                 child_face_id=child_face_id,
                 joint_rule=parsed_rule,
