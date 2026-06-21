@@ -1,7 +1,8 @@
 {
     "python.defaultInterpreterPath": "/workspaces/hycu-project/.venv/bin/python",
     "python.analysis.extraPaths": [
-        "/workspaces/hycu-project/.venv/lib/python3.12/site-packages"
+        "/workspaces/hycu-project/.venv/lib/python3.12/site-packages",
+        "./projects/backend"
     ],
     "python-envs.pythonProjects": [
         {
