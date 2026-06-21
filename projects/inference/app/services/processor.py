@@ -66,6 +66,14 @@ def estimate_dimensions(category: ProductType, image: Image.Image) -> tuple[floa
         suggested_width = 1200 + max(0, (aspect - 1.2) * 220)
         return round(suggested_width, 1), 750.0, 600.0
 
+    if category == ProductType.TV_STAND:
+        suggested_width = 1400 + max(0, (aspect - 1.3) * 180)
+        return round(suggested_width, 1), 560.0, 400.0
+
+    if category == ProductType.SIDEBOARD:
+        suggested_width = 1350 + max(0, (aspect - 1.25) * 180)
+        return round(suggested_width, 1), 720.0, 450.0
+
     if category in {ProductType.SHELF, ProductType.BOOKCASE}:
         suggested_height = 1650 + max(0, (1.0 / max(aspect, 0.35) - 1.0) * 180)
         return 900.0, round(suggested_height, 1), 300.0
@@ -1219,6 +1227,16 @@ def estimate_dimensions_multi(evidence: list[ImageEvidence]) -> tuple[float, flo
             widths.append(w)
             heights.append(750.0)
             depths.append(600.0)
+        elif item.detected_type == ProductType.TV_STAND:
+            w = 1400 + max(0, (aspect - 1.3) * 180)
+            widths.append(w)
+            heights.append(560.0)
+            depths.append(400.0)
+        elif item.detected_type == ProductType.SIDEBOARD:
+            w = 1350 + max(0, (aspect - 1.25) * 180)
+            widths.append(w)
+            heights.append(720.0)
+            depths.append(450.0)
         elif item.detected_type in {ProductType.SHELF, ProductType.BOOKCASE}:
             h = 1650 + max(0, (1.0 / max(aspect, 0.35) - 1.0) * 180)
             widths.append(900.0)
@@ -1328,6 +1346,14 @@ def assemble_project(
             detected_type = ProductType.SHELF
         else:
             detected_type = ProductType.CABINET
+
+    if detected_type == ProductType.CABINET and avg_aspect >= 1.2:
+        has_shelf_signal = component_counts.get("shelf_panel", 0) > 0
+        has_front_signal = component_counts.get("door_panel", 0) > 0 or component_counts.get("drawer_front", 0) > 0
+        if has_shelf_signal and not has_front_signal:
+            detected_type = ProductType.TV_STAND
+        elif has_front_signal and not has_shelf_signal:
+            detected_type = ProductType.SIDEBOARD
     
     # Assembly Logic (The "Model")
     component_threshold = max(

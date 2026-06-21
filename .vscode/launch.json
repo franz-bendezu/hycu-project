@@ -25,7 +25,8 @@
       "cwd": "${workspaceFolder}/projects/inference",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/projects/inference",
-        "INFERENCE_PROVIDERS": "CUDAExecutionProvider,CPUExecutionProvider"
+        "INFERENCE_PROVIDERS": "CUDAExecutionProvider,CPUExecutionProvider",
+        "INFERENCE_SAM_SEARCH_MODE": "stochastic"
       },
       "console": "integratedTerminal",
       "justMyCode": true

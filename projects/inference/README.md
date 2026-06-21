@@ -33,8 +33,42 @@ This service is optimized for **GPU inference** but includes a **Safe Fallback**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INFERENCE_PROVIDERS` | `CUDAExecutionProvider,CPUExecutionProvider` | Comma-separated list of fallback priority |
-| `INFERENCE_CONFIDENCE_THRESHOLD` | `0.25` | Min confidence for component detection |
+| `INFERENCE_CONFIDENCE_THRESHOLD` | `0.10` | Min confidence for component detection |
 | `INFERENCE_IMAGE_SIZE` | `640` | Internal model resolution |
+| `INFERENCE_SEGMENTATION_BACKEND` | `sam2` | Segmentation backend (`sam2` or `box-rasterizer`) |
+| `INFERENCE_SAM2_MODEL_PATH` | `` | Path to SAM2 checkpoint/model used for component masks |
+| `INFERENCE_SAM_SEARCH_MODE` | `beam` | SAM fallback optimizer mode (`beam` or `rjmcmc`) |
+| `INFERENCE_SAM_BEAM_WIDTH` | `12` | Beam width used when `INFERENCE_SAM_SEARCH_MODE=beam` |
+| `INFERENCE_SAM_DEPTH_WEIGHT` | `0.0` | Optional depth term weight in SAM proposal scoring |
+| `INFERENCE_SAM_DEBUG_DIR` | `app/debug/sam2` | Output directory for SAM debug artifacts |
+
+Note: segmentation now defaults to `sam2`. If SAM2 is unavailable (missing model/runtime), the service automatically falls back to `box-rasterizer`.
+
+### SAM Fallback Optimizer Modes
+
+Use deterministic mode by default:
+
+```bash
+export INFERENCE_SAM_SEARCH_MODE=beam
+```
+
+Enable stochastic refinement (rjMCMC-style local search):
+
+```bash
+export INFERENCE_SAM_SEARCH_MODE=rjmcmc
+```
+
+Example startup with explicit optimizer flags:
+
+```bash
+cd /workspaces/hycu-project/projects/inference
+export INFERENCE_SEGMENTATION_BACKEND=sam2
+export INFERENCE_SAM2_MODEL_PATH=/workspaces/hycu-project/projects/inference/models/sam2_hiera_tiny.pt
+export INFERENCE_SAM_SEARCH_MODE=rjmcmc
+export INFERENCE_SAM_BEAM_WIDTH=12
+export INFERENCE_SAM_DEPTH_WEIGHT=0.0
+uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+```
 
 ## Installation & Setup
 

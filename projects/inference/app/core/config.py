@@ -306,23 +306,46 @@ def get_execution_providers() -> list[str]:
     raw = os.getenv("INFERENCE_PROVIDERS")
     if not raw:
         # Default to trying CUDA then falling back to CPU
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return [p.strip() for p in raw.split(",") if p.strip()]
+        requested = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        requested = [p.strip() for p in raw.split(",") if p.strip()]
+
+    try:
+        import onnxruntime as ort
+
+        available = set(ort.get_available_providers())
+        filtered = [provider for provider in requested if provider in available]
+        if filtered:
+            return filtered
+        if "CPUExecutionProvider" in available:
+            return ["CPUExecutionProvider"]
+        if available:
+            return [next(iter(available))]
+    except Exception:
+        # Keep requested order when provider discovery is unavailable.
+        pass
+
+    return requested
 
 
 def get_segmentation_backend() -> SegmentationBackend:
-    raw = os.getenv("INFERENCE_SEGMENTATION_BACKEND", SegmentationBackend.BOX_RASTERIZER.value)
+    raw = os.getenv("INFERENCE_SEGMENTATION_BACKEND", SegmentationBackend.SAM2.value)
     try:
         return SegmentationBackend(raw.strip().lower())
     except ValueError:
-        return SegmentationBackend.BOX_RASTERIZER
+        return SegmentationBackend.SAM2
 
 
 def get_sam2_model_path() -> Path | None:
     raw = os.getenv("INFERENCE_SAM2_MODEL_PATH", "").strip()
-    if not raw:
-        return None
-    return Path(raw)
+    if raw:
+        return Path(raw)
+
+    bundled = Path(__file__).resolve().parents[2] / "models" / "sam2_hiera_tiny.pt"
+    if bundled.exists():
+        return bundled
+
+    return None
 
 
 def get_escalation_geometry_threshold() -> float:
