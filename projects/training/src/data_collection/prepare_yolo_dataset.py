@@ -25,7 +25,7 @@ COMPONENT_CLASSES = (
     "drawer_box",
     "leg",
     "front_apron",
-    "handle",
+    "handle_pull",
     "hinge",
     "telescopic_slide",
     "rail",

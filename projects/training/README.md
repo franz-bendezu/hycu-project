@@ -68,7 +68,24 @@ python src/data_collection/scrapers/collect_wikimedia_open.py \
 	--metadata-csv datasets/raw/metadata_open.csv \
 	--per-category 6 \
 	--thumb-width 320
+
+# Build a balanced raw cabinet/desk/shelf set from Promart metadata/images.
+python src/data_collection/build_promart_balanced_raw_dataset.py \
+	--images-metadata-csv datasets/raw/promart_product_images_metadata.csv \
+	--products-metadata-csv datasets/raw/promart_flat_wood_metadata.csv \
+	--output-root datasets/raw/images \
+	--strategy strict-balance \
+	--max-per-class 800 \
+	--min-per-class 20 \
+	--max-per-brand-per-class 80 \
+	--max-images-per-product 2 \
+	--mode copy
 ```
+
+Notes for balancing behavior:
+- `--strategy cap`: each class is sampled independently up to `--max-per-class`.
+- `--strategy strict-balance`: all classes are sampled to a shared cap based on the smallest available class.
+- `--min-per-class`: hard-fails the run when any class ends below the threshold.
 
 3. Train YOLOv11 + regression model (Manual):
 
@@ -117,6 +134,8 @@ python src/orchestration/run_pipeline.py --config configs/components_pipeline_pr
 
 When `production_mode: true`, the pipeline additionally enforces:
 - minimum train/val sample counts
+- minimum non-empty label files for train/val
+- minimum box count for required classes (default: cabinet, desk, shelf)
 - maximum class imbalance ratio
 - promotion thresholds from training metrics (`mAP50`, `mAP50-95`, `precision`, `recall`)
 - artifact metadata with file size and `sha256` checksums in the manifest

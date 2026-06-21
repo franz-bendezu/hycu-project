@@ -26,7 +26,11 @@ mode: copy
 production_mode: true
 min_train_images: 120
 min_val_images: 24
+min_non_empty_train_labels: 84
+min_non_empty_val_labels: 14
 max_class_imbalance_ratio: 3.0
+required_box_classes: [cabinet, desk, shelf]
+min_boxes_per_required_class: 10
 min_map50: 0.30
 min_map50_95: 0.20
 min_precision: 0.09

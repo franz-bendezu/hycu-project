@@ -44,7 +44,11 @@ class PipelineConfig:
     production_mode: bool
     min_train_images: int
     min_val_images: int
+    min_non_empty_train_labels: int
+    min_non_empty_val_labels: int
     max_class_imbalance_ratio: float
+    min_boxes_per_required_class: int
+    required_box_classes: tuple[str, ...]
     min_map50: float
     min_map50_95: float
     min_precision: float
@@ -113,7 +117,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-train-images", type=int, default=None)
     parser.add_argument("--min-val-images", type=int, default=None)
+    parser.add_argument("--min-non-empty-train-labels", type=int, default=None)
+    parser.add_argument("--min-non-empty-val-labels", type=int, default=None)
     parser.add_argument("--max-class-imbalance-ratio", type=float, default=None)
+    parser.add_argument("--min-boxes-per-required-class", type=int, default=None)
+    parser.add_argument(
+        "--required-box-classes",
+        default=None,
+        help="Comma-separated class names that must each meet min box count",
+    )
     parser.add_argument("--min-map50", type=float, default=None)
     parser.add_argument("--min-map50-95", type=float, default=None)
     parser.add_argument("--min-precision", type=float, default=None)
@@ -182,9 +194,47 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     production_mode = bool(_pick(args.production_mode, cfg, "production_mode", False))
     min_train_images = int(_pick(args.min_train_images, cfg, "min_train_images", 50 if production_mode else 1))
     min_val_images = int(_pick(args.min_val_images, cfg, "min_val_images", 10 if production_mode else 0))
+    min_non_empty_train_labels = int(
+        _pick(
+            args.min_non_empty_train_labels,
+            cfg,
+            "min_non_empty_train_labels",
+            max(1, int(min_train_images * 0.7)) if production_mode else 1,
+        )
+    )
+    min_non_empty_val_labels = int(
+        _pick(
+            args.min_non_empty_val_labels,
+            cfg,
+            "min_non_empty_val_labels",
+            int(min_val_images * 0.6) if production_mode else 0,
+        )
+    )
     max_class_imbalance_ratio = float(
         _pick(args.max_class_imbalance_ratio, cfg, "max_class_imbalance_ratio", 3.0 if production_mode else 999.0)
     )
+    min_boxes_per_required_class = int(
+        _pick(
+            args.min_boxes_per_required_class,
+            cfg,
+            "min_boxes_per_required_class",
+            10 if production_mode else 1,
+        )
+    )
+    raw_required_box_classes = _pick(
+        args.required_box_classes,
+        cfg,
+        "required_box_classes",
+        "cabinet,desk,shelf",
+    )
+    if isinstance(raw_required_box_classes, str):
+        required_box_classes = tuple(
+            item.strip() for item in raw_required_box_classes.split(",") if item.strip()
+        )
+    elif isinstance(raw_required_box_classes, list):
+        required_box_classes = tuple(str(item).strip() for item in raw_required_box_classes if str(item).strip())
+    else:
+        required_box_classes = ("cabinet", "desk", "shelf")
     min_map50 = float(_pick(args.min_map50, cfg, "min_map50", 0.35 if production_mode else 0.0))
     min_map50_95 = float(_pick(args.min_map50_95, cfg, "min_map50_95", 0.20 if production_mode else 0.0))
     min_precision = float(_pick(args.min_precision, cfg, "min_precision", 0.30 if production_mode else 0.0))
@@ -215,7 +265,11 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         production_mode=production_mode,
         min_train_images=min_train_images,
         min_val_images=min_val_images,
+        min_non_empty_train_labels=min_non_empty_train_labels,
+        min_non_empty_val_labels=min_non_empty_val_labels,
         max_class_imbalance_ratio=max_class_imbalance_ratio,
+        min_boxes_per_required_class=min_boxes_per_required_class,
+        required_box_classes=required_box_classes,
         min_map50=min_map50,
         min_map50_95=min_map50_95,
         min_precision=min_precision,
@@ -260,8 +314,23 @@ def _dataset_label_stats(dataset_yaml: Path) -> dict[str, Any]:
     if not labels_root.exists():
         raise FileNotFoundError(f"Labels directory not found: {labels_root}")
 
+    names_value = yaml_doc.get("names")
+    class_name_by_id: dict[int, str] = {}
+    if isinstance(names_value, list):
+        class_name_by_id = {idx: str(name) for idx, name in enumerate(names_value)}
+    elif isinstance(names_value, dict):
+        for key, value in names_value.items():
+            try:
+                class_name_by_id[int(key)] = str(value)
+            except Exception:
+                continue
+
     split_counts: dict[str, int] = {"train": 0, "val": 0}
+    split_non_empty_counts: dict[str, int] = {"train": 0, "val": 0}
     by_category: dict[str, int] = {}
+    non_empty_by_category: dict[str, int] = {}
+    boxes_per_class: dict[str, int] = {}
+    total_boxes = 0
     for split in ("train", "val"):
         split_dir = labels_root / split
         if not split_dir.exists():
@@ -270,6 +339,27 @@ def _dataset_label_stats(dataset_yaml: Path) -> dict[str, Any]:
             split_counts[split] += 1
             category = _category_from_label_name(label_file)
             by_category[category] = by_category.get(category, 0) + 1
+
+            text = label_file.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+
+            split_non_empty_counts[split] += 1
+            non_empty_by_category[category] = non_empty_by_category.get(category, 0) + 1
+
+            for line in text.splitlines():
+                parts = line.strip().split()
+                if len(parts) != 5:
+                    continue
+                try:
+                    class_id = int(parts[0])
+                except ValueError:
+                    continue
+                if class_id < 0:
+                    continue
+                class_name = class_name_by_id.get(class_id, f"class_{class_id}")
+                boxes_per_class[class_name] = boxes_per_class.get(class_name, 0) + 1
+                total_boxes += 1
 
     non_zero = [count for count in by_category.values() if count > 0]
     if non_zero:
@@ -284,6 +374,12 @@ def _dataset_label_stats(dataset_yaml: Path) -> dict[str, Any]:
         "val_images": split_counts["val"],
         "total_images": split_counts["train"] + split_counts["val"],
         "class_counts": by_category,
+        "non_empty_train_labels": split_non_empty_counts["train"],
+        "non_empty_val_labels": split_non_empty_counts["val"],
+        "total_non_empty_labels": split_non_empty_counts["train"] + split_non_empty_counts["val"],
+        "non_empty_category_counts": non_empty_by_category,
+        "total_boxes": total_boxes,
+        "boxes_per_class": boxes_per_class,
         "class_imbalance_ratio": imbalance_ratio,
     }
 
@@ -299,15 +395,41 @@ def enforce_data_quality_gates(config: PipelineConfig) -> dict[str, Any]:
         raise RuntimeError(
             f"Data quality gate failed: val_images={stats['val_images']} < min_val_images={config.min_val_images}"
         )
+    if stats["non_empty_train_labels"] < config.min_non_empty_train_labels:
+        raise RuntimeError(
+            "Data quality gate failed: non_empty_train_labels="
+            f"{stats['non_empty_train_labels']} < min_non_empty_train_labels={config.min_non_empty_train_labels}"
+        )
+    if stats["non_empty_val_labels"] < config.min_non_empty_val_labels:
+        raise RuntimeError(
+            "Data quality gate failed: non_empty_val_labels="
+            f"{stats['non_empty_val_labels']} < min_non_empty_val_labels={config.min_non_empty_val_labels}"
+        )
     if stats["class_imbalance_ratio"] > config.max_class_imbalance_ratio:
         raise RuntimeError(
             "Data quality gate failed: class imbalance ratio "
             f"{stats['class_imbalance_ratio']:.2f} > max_class_imbalance_ratio={config.max_class_imbalance_ratio:.2f}"
         )
 
+    boxes_per_class = stats.get("boxes_per_class", {})
+    missing_required: list[str] = []
+    for class_name in config.required_box_classes:
+        count = int(boxes_per_class.get(class_name, 0))
+        if count < config.min_boxes_per_required_class:
+            missing_required.append(f"{class_name}={count}")
+    if missing_required:
+        joined = ", ".join(missing_required)
+        raise RuntimeError(
+            "Data quality gate failed: insufficient boxes for required classes; "
+            f"need >= {config.min_boxes_per_required_class} each, got {joined}"
+        )
+
     print(
         "Data quality gates passed: "
-        f"train={stats['train_images']}, val={stats['val_images']}, imbalance_ratio={stats['class_imbalance_ratio']:.2f}"
+        f"train={stats['train_images']}, val={stats['val_images']}, "
+        f"non_empty_train={stats['non_empty_train_labels']}, "
+        f"non_empty_val={stats['non_empty_val_labels']}, "
+        f"boxes={stats['total_boxes']}, imbalance_ratio={stats['class_imbalance_ratio']:.2f}"
     )
     return stats
 
