@@ -584,6 +584,116 @@ def test_infer_applies_heavy_refiner_when_escalated(monkeypatch) -> None:
     assert body["constraints_report"].get("heavy_refinement_attempted") in {True, False}
 
 
+def test_infer_applies_geometry_refiner_when_escalated(monkeypatch) -> None:
+    payload = {"image_urls": [_png_data_url(_solid_image(640, 420, (130, 130, 130)))]}
+
+    monkeypatch.setattr(
+        "app.main._detector",
+        lambda: _AnalyzeDetectorStub(
+            outputs=[(
+                "cabinet",
+                0.14,
+                [
+                    {"class_id": 0, "score": 0.74, "box": (20.0, 20.0, 320.0, 380.0)},
+                    {"class_id": 1, "score": 0.71, "box": (330.0, 20.0, 620.0, 390.0)},
+                ],
+            )],
+            labels=("side_panel", "door_panel"),
+            score_threshold=0.25,
+        ),
+    )
+    monkeypatch.setattr("app.services.processor.get_escalation_geometry_threshold", lambda: 0.1)
+    monkeypatch.setattr("app.services.processor.get_escalation_mvs_threshold", lambda: 0.95)
+
+    with TestClient(app) as client:
+        response = client.post("/infer", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["escalation"]["strategy"] == "geometry_refinement_requires_depth"
+    assert body["constraints_report"].get("proposal_depth_samples", 0) == 0
+    assert "geometry_refinement_missing_depth" in body["review_flags"]
+
+
+def test_infer_geometry_refiner_is_deterministic(monkeypatch) -> None:
+    payload = {"image_urls": [_png_data_url(_solid_image(640, 420, (130, 130, 130)))]}
+
+    monkeypatch.setattr(
+        "app.main._detector",
+        lambda: _AnalyzeDetectorStub(
+            outputs=[(
+                "cabinet",
+                0.14,
+                [
+                    {"class_id": 0, "score": 0.74, "box": (20.0, 20.0, 320.0, 380.0)},
+                    {"class_id": 1, "score": 0.71, "box": (330.0, 20.0, 620.0, 390.0)},
+                ],
+            )],
+            labels=("side_panel", "door_panel"),
+            score_threshold=0.25,
+        ),
+    )
+    monkeypatch.setattr("app.services.processor.get_escalation_geometry_threshold", lambda: 0.1)
+    monkeypatch.setattr("app.services.processor.get_escalation_mvs_threshold", lambda: 0.95)
+
+    with TestClient(app) as client:
+        first = client.post("/infer", json=payload)
+        second = client.post("/infer", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    body_a = first.json()
+    body_b = second.json()
+    assert body_a["constraints_report"].get("proposal_depth_samples") == 0
+    assert body_b["constraints_report"].get("proposal_depth_samples") == 0
+    assert body_a["escalation"]["strategy"] == body_b["escalation"]["strategy"] == "geometry_refinement_requires_depth"
+
+
+def test_infer_geometry_refiner_uses_depth_signal_when_available(monkeypatch) -> None:
+    payload = {"image_urls": [_png_data_url(_solid_image(640, 420, (140, 140, 140)))]}
+
+    monkeypatch.setattr(
+        "app.main._detector",
+        lambda: _AnalyzeDetectorStub(
+            outputs=[(
+                "cabinet",
+                0.14,
+                [
+                    {
+                        "class_id": 0,
+                        "score": 0.74,
+                        "box": (20.0, 20.0, 320.0, 380.0),
+                        "image_width_px": 640,
+                        "image_height_px": 420,
+                        "depth_mm": 980.0,
+                    },
+                    {
+                        "class_id": 1,
+                        "score": 0.71,
+                        "box": (330.0, 20.0, 620.0, 390.0),
+                        "image_width_px": 640,
+                        "image_height_px": 420,
+                        "depth_mm": 620.0,
+                    },
+                ],
+            )],
+            labels=("back_panel", "door_panel"),
+            score_threshold=0.25,
+        ),
+    )
+    monkeypatch.setattr("app.services.processor.get_escalation_geometry_threshold", lambda: 0.1)
+    monkeypatch.setattr("app.services.processor.get_escalation_mvs_threshold", lambda: 0.95)
+
+    with TestClient(app) as client:
+        response = client.post("/infer", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["escalation"]["strategy"] == "geometry_refinement_applied"
+    assert body["constraints_report"].get("proposal_depth_samples", 0) > 0
+    assert body["constraints_report"].get("proposal_depth_signal", 0.0) > 0.0
+
+
 def test_benchmark_returns_aggregate_metrics(monkeypatch) -> None:
     item_a = _png_data_url(_solid_image(400, 320, (120, 120, 120)))
     item_b = _png_data_url(_solid_image(400, 640, (150, 150, 150)))

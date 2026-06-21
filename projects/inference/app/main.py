@@ -15,12 +15,14 @@ from app.core.config import (
     get_sam2_model_path,
     get_segmentation_backend,
 )
-from app.schemas import (
+from app.models import (
     BenchmarkItemSummary,
     BenchmarkRequest,
     BenchmarkResponse,
+    EscalationStrategy,
     InferRequest,
     InferResponse,
+    RawDetection,
 )
 from app.services.detector import YoloDetector
 from app.services.segmenter import Segmenter
@@ -108,27 +110,31 @@ def _infer_once(image_urls: list[str]) -> InferResponse:
     for idx, evidence in enumerate(detection_result.evidence):
         image, _ = images_with_urls[idx]
 
-        normalized_detections: list[dict] = []
+        normalized_detections: list[RawDetection] = []
         for detection in evidence.raw_detections:
-            box = detection.get("box")
-            if isinstance(box, (tuple, list)) and len(box) == 4:
-                enriched = dict(detection)
-                enriched["view_index"] = idx
+            box = detection.box
+            if isinstance(box, tuple) and len(box) == 4:
+                enriched = detection.model_copy(update={"view_index": idx})
                 normalized_detections.append(enriched)
 
         tracked = tracker.update(normalized_detections)
-        boxes = [tuple(item["box"]) for item in tracked if isinstance(item.get("box"), (list, tuple))]
+        boxes = [item.box for item in tracked]
         masks = segmenter.predict(image, boxes) if boxes else []
 
+        enriched_tracked: list[RawDetection] = []
         for det_idx, item in enumerate(tracked):
-            item.setdefault("image_width_px", image.width)
-            item.setdefault("image_height_px", image.height)
+            update_data: dict[str, int | float] = {}
+            if item.image_width_px is None:
+                update_data["image_width_px"] = image.width
+            if item.image_height_px is None:
+                update_data["image_height_px"] = image.height
             if det_idx < len(masks):
                 mask_area = int(masks[det_idx].sum())
-                item["mask_area_px"] = mask_area
-                item["mask_fill_ratio"] = round(mask_area / max(image.width * image.height, 1), 5)
+                update_data["mask_area_px"] = mask_area
+                update_data["mask_fill_ratio"] = round(mask_area / max(image.width * image.height, 1), 5)
+            enriched_tracked.append(item.model_copy(update=update_data) if update_data else item)
 
-        evidence.raw_detections = tracked
+        evidence.raw_detections = enriched_tracked
 
     response = assemble_project(detection_result.evidence, detector.labels, detector.score_threshold)
     response = _refiner().maybe_refine(response, detection_result.evidence)
@@ -150,7 +156,11 @@ def benchmark(payload: BenchmarkRequest) -> BenchmarkResponse:
 
         component_coverage = float(response.validation_metrics.get("component_coverage", 0.0))
         physical_validity = float(response.validation_metrics.get("physical_validity_score", 0.0))
-        escalation_strategy = str(response.escalation.get("strategy", "fast_2d_fusion"))
+        raw_strategy = str(response.escalation.get("strategy", EscalationStrategy.FAST_2D_FUSION.value))
+        try:
+            escalation_strategy = EscalationStrategy(raw_strategy)
+        except ValueError:
+            escalation_strategy = EscalationStrategy.FAST_2D_FUSION
         human_review = bool(response.escalation.get("human_review_required", False))
 
         item_results.append(
@@ -164,7 +174,7 @@ def benchmark(payload: BenchmarkRequest) -> BenchmarkResponse:
                 human_review_required=human_review,
             )
         )
-        strategy_counts[escalation_strategy] += 1
+        strategy_counts[escalation_strategy.value] += 1
 
     total_items = len(item_results)
     human_review_count = sum(1 for item in item_results if item.human_review_required)

@@ -10,7 +10,7 @@ from PIL import Image
 from app.core.config import PRODUCT_TYPE_ALIASES, get_image_size_fallback, get_execution_providers
 from app.utils.image import nms, preprocess
 
-from app.schemas import ImageEvidence, InferResponse, ProductType
+from app.models import ImageEvidence, InferResponse, ProductType, RawDetection
 
 
 logger = logging.getLogger(__name__)
@@ -55,16 +55,16 @@ class YoloDetector:
         except ValueError:
             return None
 
-    def _resolve_detected_type(self, detections: list[dict]) -> ProductType:
+    def _resolve_detected_type(self, detections: list[RawDetection]) -> ProductType:
         scores_by_type: dict[ProductType, float] = {}
         for det in detections:
-            class_id = int(det.get("class_id", -1))
+            class_id = int(det.class_id)
             if class_id < 0 or class_id >= len(self.labels):
                 continue
             product_type = self._label_to_product_type(self.labels[class_id])
             if product_type is None:
                 continue
-            score = float(det.get("score", 0.0))
+            score = float(det.score)
             scores_by_type[product_type] = max(scores_by_type.get(product_type, 0.0), score)
 
         if scores_by_type:
@@ -96,35 +96,37 @@ class YoloDetector:
             raw_detections = self._extract_detections(outputs[0], len(self.labels))
             
             # Post-process: scale xyxy boxes from model-space to image-space.
-            scaled_detections = []
+            scaled_detections: list[RawDetection] = []
             x_scale = orig_w / self.input_width
             y_scale = orig_h / self.input_height
             
             for d in raw_detections:
-                x1, y1, x2, y2 = d["box"]
+                x1, y1, x2, y2 = d.box
                 x1 *= x_scale
                 y1 *= y_scale
                 x2 *= x_scale
                 y2 *= y_scale
                 
-                scaled_detections.append({
-                    "box": (
-                        round(x1, 1),
-                        round(y1, 1),
-                        round(x2, 1),
-                        round(y2, 1),
-                    ),
-                    "score": d["score"],
-                    "class_id": d["class_id"],
-                    "label": self.labels[d["class_id"]] if d["class_id"] < len(self.labels) else "unknown",
-                    "image_width_px": orig_w,
-                    "image_height_px": orig_h,
-                })
+                scaled_detections.append(
+                    RawDetection(
+                        box=(
+                            round(x1, 1),
+                            round(y1, 1),
+                            round(x2, 1),
+                            round(y2, 1),
+                        ),
+                        score=d.score,
+                        class_id=d.class_id,
+                        label=self.labels[d.class_id] if d.class_id < len(self.labels) else "unknown",
+                        image_width_px=orig_w,
+                        image_height_px=orig_h,
+                    )
+                )
 
             # Resolved confidence and type for this image
             if scaled_detections:
-                best_det = max(scaled_detections, key=lambda x: x["score"])
-                confidence = best_det["score"]
+                best_det = max(scaled_detections, key=lambda x: x.score)
+                confidence = best_det.score
                 detected_type = self._resolve_detected_type(scaled_detections)
             else:
                 confidence = 0.0
@@ -143,7 +145,7 @@ class YoloDetector:
 
         return assemble_project(evidence_list, self.labels, self.score_threshold)
 
-    def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[dict]:
+    def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[RawDetection]:
         tensor = np.array(output)
 
         logger.debug("Raw tensor shape before processing: %s", tensor.shape)
@@ -162,7 +164,7 @@ class YoloDetector:
             return []
 
         _, cols = tensor.shape
-        detections: list[dict] = []
+        detections: list[RawDetection] = []
         
         logger.debug("Final tensor shape: %s, labels expected: %s", tensor.shape, num_labels)
 
@@ -171,11 +173,13 @@ class YoloDetector:
             for row in tensor:
                 score = float(row[4])
                 if score >= self.score_threshold:
-                    detections.append({
-                        "box": (float(row[0]), float(row[1]), float(row[2]), float(row[3])),
-                        "score": score,
-                        "class_id": int(row[5])
-                    })
+                    detections.append(
+                        RawDetection(
+                            box=(float(row[0]), float(row[1]), float(row[2]), float(row[3])),
+                            score=score,
+                            class_id=int(row[5]),
+                        )
+                    )
             return detections
 
         # Case 2: YOLO format [cx, cy, w, h, class_scores...] or
@@ -208,16 +212,18 @@ class YoloDetector:
             
             if score >= effective_threshold:
                 cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                detections.append({
-                    "box": (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
-                    "score": score,
-                    "class_id": class_id
-                })
+                detections.append(
+                    RawDetection(
+                        box=(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                        score=score,
+                        class_id=class_id,
+                    )
+                )
 
         # Post-process with NMS
         if detections:
-            boxes = np.array([d["box"] for d in detections])
-            scores = np.array([d["score"] for d in detections])
+            boxes = np.array([d.box for d in detections])
+            scores = np.array([d.score for d in detections])
             
             indices_to_keep = nms(boxes, scores, iou_threshold=0.5)
             

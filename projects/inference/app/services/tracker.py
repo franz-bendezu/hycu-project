@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.models import RawDetection
+
 
 @dataclass
 class TrackState:
@@ -55,21 +57,18 @@ class MultiViewTracker:
         self._next_track_id = 1
         self._tracks: list[TrackState] = []
 
-    def update(self, detections: list[dict]) -> list[dict]:
+    def update(self, detections: list[RawDetection]) -> list[RawDetection]:
         # Age all existing tracks before matching.
         for track in self._tracks:
             track.age += 1
 
         assigned_track_ids: set[int] = set()
-        output: list[dict] = []
+        output: list[RawDetection] = []
 
         for det in detections:
-            box = det.get("box")
-            if not isinstance(box, (tuple, list)) or len(box) != 4:
-                output.append(det)
-                continue
+            box = det.box
 
-            class_id = int(det.get("class_id", -1))
+            class_id = int(det.class_id)
             best_idx = -1
             best_score = -1.0
             best_iou = 0.0
@@ -96,21 +95,24 @@ class MultiViewTracker:
             ):
                 track = self._tracks[best_idx]
                 track.box = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
-                track.score = float(det.get("score", track.score))
-                track.class_scores[class_id] = track.class_scores.get(class_id, 0.0) + float(det.get("score", 0.0))
+                track.score = float(det.score)
+                track.class_scores[class_id] = track.class_scores.get(class_id, 0.0) + float(det.score)
                 track.class_id = _dominant_class_id(track.class_scores, class_id)
                 track.age = 0
                 assigned_track_ids.add(track.track_id)
 
-                updated = dict(det)
-                updated["track_id"] = track.track_id
-                updated["track_iou"] = round(best_iou, 4)
-                updated["class_id"] = track.class_id
+                updated = det.model_copy(
+                    update={
+                        "track_id": track.track_id,
+                        "track_iou": round(best_iou, 4),
+                        "class_id": track.class_id,
+                    }
+                )
                 output.append(updated)
             else:
                 track_id = self._next_track_id
                 self._next_track_id += 1
-                initial_score = float(det.get("score", 0.0))
+                initial_score = float(det.score)
                 self._tracks.append(
                     TrackState(
                         track_id=track_id,
@@ -123,9 +125,7 @@ class MultiViewTracker:
                 )
                 assigned_track_ids.add(track_id)
 
-                updated = dict(det)
-                updated["track_id"] = track_id
-                updated["track_iou"] = 1.0
+                updated = det.model_copy(update={"track_id": track_id, "track_iou": 1.0})
                 output.append(updated)
 
         # Drop stale tracks.

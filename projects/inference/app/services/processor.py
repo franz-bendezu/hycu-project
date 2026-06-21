@@ -23,11 +23,18 @@ from app.core.config import (
 )
 from app.schemas import (
     Component,
+    ComponentCategory,
     ComponentKind,
+    ComponentAggregate,
+    DetectionCandidate,
     DoorType,
+    EscalationStrategy,
+    FaceEvidence,
+    HardwareMountFace,
     InteriorVisibility,
     JointType,
     JointEvidence,
+    JointRule,
     HardwareCode,
     HardwareRecommendation,
     InteriorAssessment,
@@ -36,6 +43,18 @@ from app.schemas import (
     ImageEvidence,
     InferResponse,
     ProductType,
+    RawDetection,
+    StableDetection,
+)
+
+
+FACE_ORDER: tuple[HardwareMountFace, ...] = (
+    HardwareMountFace.POS_X,
+    HardwareMountFace.NEG_X,
+    HardwareMountFace.POS_Y,
+    HardwareMountFace.NEG_Y,
+    HardwareMountFace.POS_Z,
+    HardwareMountFace.NEG_Z,
 )
 
 
@@ -119,6 +138,7 @@ def minimum_components_for_type(detected_type: ProductType) -> list[Component]:
             id=component_id(name),
             name=name,
             kind=component_kind(name),
+            category=ComponentCategory.STRUCTURAL,
             quantity=max(1, int(quantity)),
         )
         for name, quantity in sorted(minimums.items())
@@ -131,10 +151,65 @@ def normalize_component_name(label: str) -> str:
 
 
 COMPONENT_ID_NAMESPACE = uuid.UUID("5e7488f8-944f-4f20-816b-70a6f8eb8cb1")
+FACE_ID_NAMESPACE = uuid.UUID("c0f6f2da-6f68-4a69-8e57-f768544190f0")
+JOINT_ID_NAMESPACE = uuid.UUID("a30f90b3-d6c7-4fc7-9a17-aee24a4f43fb")
 
-def component_id(name: str) -> str:
+def component_id(name: str, seed: str | None = None) -> str:
     normalized = normalize_component_name(name)
-    return str(uuid.uuid5(COMPONENT_ID_NAMESPACE, normalized))
+    if seed is None:
+        return str(uuid.uuid5(COMPONENT_ID_NAMESPACE, normalized))
+    return str(uuid.uuid5(COMPONENT_ID_NAMESPACE, f"{normalized}:{seed}"))
+
+
+def face_id(component_id_value: str, normal: HardwareMountFace) -> str:
+    face_uuid = uuid.uuid5(FACE_ID_NAMESPACE, f"{component_id_value}:{normal.value}")
+    return f"{component_id_value}:{normal.value}:{face_uuid}"
+
+
+def build_faces(components: list[Component]) -> tuple[list[FaceEvidence], dict[tuple[str, HardwareMountFace], str]]:
+    faces: list[FaceEvidence] = []
+    index: dict[tuple[str, HardwareMountFace], str] = {}
+    for component in components:
+        for normal in FACE_ORDER:
+            current_face_id = face_id(component.id, normal)
+            faces.append(FaceEvidence(id=current_face_id, component_id=component.id, normal=normal))
+            index[(component.id, normal)] = current_face_id
+    return faces, index
+
+
+def preferred_face(kind: ComponentKind, relation: str) -> HardwareMountFace:
+    if relation == "parent":
+        if kind == ComponentKind.LEFT_SIDE:
+            return HardwareMountFace.POS_X
+        if kind == ComponentKind.RIGHT_SIDE:
+            return HardwareMountFace.NEG_X
+        if kind == ComponentKind.TOP_PANEL:
+            return HardwareMountFace.NEG_Y
+        if kind == ComponentKind.BOTTOM_PANEL:
+            return HardwareMountFace.POS_Y
+        if kind == ComponentKind.BACK_PANEL:
+            return HardwareMountFace.POS_Z
+        return HardwareMountFace.POS_Z
+
+    if kind in {ComponentKind.TOP_PANEL, ComponentKind.BOTTOM_PANEL, ComponentKind.SHELF, ComponentKind.DIVIDER_PANEL}:
+        return HardwareMountFace.NEG_X
+    if kind in {ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT, ComponentKind.FRONT_PANEL}:
+        return HardwareMountFace.POS_Z
+    return HardwareMountFace.POS_X
+
+
+def joint_rule_from_type(joint_type: JointType) -> JointRule | None:
+    if joint_type == JointType.CAM_LOCK:
+        return JointRule.OVERLAP
+    if joint_type == JointType.SHELF_PIN:
+        return JointRule.INSET
+    if joint_type in {JointType.SLIDING_TRACK, JointType.TELESCOPIC_SLIDE}:
+        return JointRule.BETWEEN
+    if joint_type == JointType.SCREW:
+        return JointRule.FLUSH_BACK
+    if joint_type in {JointType.HINGE, JointType.BRACKET}:
+        return JointRule.MOUNT
+    return None
 
 
 def normalize_box(
@@ -233,7 +308,7 @@ def build_constraints_report(components: list[Component], joints: list[JointEvid
     }
     flags: list[str] = []
 
-    structural = [c for c in components if c.kind in {ComponentKind.PANEL, ComponentKind.SUPPORT, ComponentKind.ASSEMBLY}]
+    structural = [c for c in components if not is_hardware_component(c)]
     connected_ids = {j.parent_component_id for j in joints} | {j.child_component_id for j in joints}
     floating = [c for c in structural if c.id not in connected_ids and c.quantity > 0]
     if floating:
@@ -349,18 +424,18 @@ def build_escalation_decision(
     geometry_threshold = get_escalation_geometry_threshold()
     mvs_threshold = max(geometry_threshold, get_escalation_mvs_threshold())
 
-    strategy = "fast_2d_fusion"
+    strategy = EscalationStrategy.FAST_2D_FUSION
     human_review = False
     if score >= mvs_threshold:
-        strategy = "escalate_mvs_refinement"
+        strategy = EscalationStrategy.ESCALATE_MVS_REFINEMENT
         human_review = True
     elif score >= geometry_threshold:
-        strategy = "escalate_geometry_optimization"
+        strategy = EscalationStrategy.ESCALATE_GEOMETRY_OPTIMIZATION
         human_review = True
 
     return {
         "escalation_score": round(min(1.0, score), 4),
-        "strategy": strategy,
+        "strategy": strategy.value,
         "human_review_required": human_review,
         "geometry_threshold": round(geometry_threshold, 4),
         "mvs_threshold": round(mvs_threshold, 4),
@@ -369,7 +444,7 @@ def build_escalation_decision(
 
 
 def joint_id(parent_component_id: str, child_component_id: str, joint_type: JointType) -> str:
-    return f"joint_{parent_component_id}_{child_component_id}_{joint_type.value}"
+    return str(uuid.uuid5(JOINT_ID_NAMESPACE, f"{parent_component_id}:{child_component_id}:{joint_type.value}"))
 
 
 def canonical_component_name(label: str) -> str:
@@ -382,15 +457,62 @@ def canonical_component_name(label: str) -> str:
     return normalized
 
 
-def component_kind(label: str) -> ComponentKind:
+def component_kind(
+    label: str,
+    box: tuple[float, float, float, float] | None = None,
+) -> ComponentKind:
     normalized = canonical_component_name(label)
-    if any(token in normalized for token in ("slide", "hinge", "handle_pull", "bracket", "track")):
-        return ComponentKind.HARDWARE
-    if any(token in normalized for token in ("panel", "door", "shelf", "top", "bottom", "back", "side", "drawer")):
-        return ComponentKind.PANEL
-    if any(token in normalized for token in ("leg", "support", "brace", "apron", "rail", "rod")):
-        return ComponentKind.SUPPORT
-    return ComponentKind.ASSEMBLY
+    if normalized in {"left_side", "left_side_panel"}:
+        return ComponentKind.LEFT_SIDE
+    if normalized in {"right_side", "right_side_panel"}:
+        return ComponentKind.RIGHT_SIDE
+    if normalized in {"top_panel", "table_top", "desktop"}:
+        return ComponentKind.TOP_PANEL
+    if normalized in {"bottom_panel", "base_panel"}:
+        return ComponentKind.BOTTOM_PANEL
+    if normalized in {"back_panel", "cabinet_body", "bookcase_body", "dresser_body", "nightstand_body", "sideboard_body", "tv_stand_body"}:
+        return ComponentKind.BACK_PANEL
+    if normalized in {"shelf", "shelf_panel"}:
+        return ComponentKind.SHELF
+    if normalized in {"divider_panel", "divider"}:
+        return ComponentKind.DIVIDER_PANEL
+    if normalized in {"front_panel", "front_apron", "desk_frame"}:
+        return ComponentKind.FRONT_PANEL
+    if normalized in {"door_panel", "door"}:
+        return ComponentKind.DOOR_PANEL
+    if normalized in {"drawer_front", "drawer_face", "drawer_box"}:
+        return ComponentKind.DRAWER_FRONT
+    if normalized in {"leg", "left_leg", "right_leg"}:
+        if box is None:
+            return ComponentKind.LEFT_LEG_FRONT
+        cx, cy = box_center(box)
+        if cx <= 0.5 and cy <= 0.5:
+            return ComponentKind.LEFT_LEG_FRONT
+        if cx > 0.5 and cy <= 0.5:
+            return ComponentKind.RIGHT_LEG_FRONT
+        if cx <= 0.5 and cy > 0.5:
+            return ComponentKind.LEFT_LEG_BACK
+        return ComponentKind.RIGHT_LEG_BACK
+    if "side" in normalized:
+        if box is None:
+            return ComponentKind.LEFT_SIDE
+        cx, _ = box_center(box)
+        return ComponentKind.LEFT_SIDE if cx <= 0.5 else ComponentKind.RIGHT_SIDE
+    if "top" in normalized:
+        return ComponentKind.TOP_PANEL
+    if "bottom" in normalized:
+        return ComponentKind.BOTTOM_PANEL
+    if "back" in normalized:
+        return ComponentKind.BACK_PANEL
+    if "shelf" in normalized:
+        return ComponentKind.SHELF
+    if "divider" in normalized:
+        return ComponentKind.DIVIDER_PANEL
+    if "door" in normalized:
+        return ComponentKind.DOOR_PANEL
+    if "drawer" in normalized:
+        return ComponentKind.DRAWER_FRONT
+    return ComponentKind.FRONT_PANEL
 
 
 PRODUCT_CLASS_COMPONENT_NAMES = {
@@ -419,11 +541,11 @@ FALLBACK_PRODUCT_COMPONENT_BY_TYPE: dict[ProductType, str] = {
 }
 
 
-def _has_informative_mask(det: dict) -> bool:
-    box = det.get("box")
-    image_w = det.get("image_width_px")
-    image_h = det.get("image_height_px")
-    mask_fill_ratio = det.get("mask_fill_ratio")
+def _has_informative_mask(det: RawDetection) -> bool:
+    box = det.box
+    image_w = det.image_width_px
+    image_h = det.image_height_px
+    mask_fill_ratio = det.mask_fill_ratio
 
     if not isinstance(box, (tuple, list)) or len(box) != 4:
         return False
@@ -441,13 +563,13 @@ def _has_informative_mask(det: dict) -> bool:
     return float(mask_fill_ratio) < (bbox_fill_ratio * 0.9)
 
 
-def geometry_relabel_component_name(name: str, det: dict, *, allow_product_relabel: bool) -> str:
-    box = det.get("box")
+def geometry_relabel_component_name(name: str, det: RawDetection, *, allow_product_relabel: bool) -> str:
+    box = det.box
     if not isinstance(box, (tuple, list)) or len(box) != 4:
         return name
 
-    image_w = det.get("image_width_px")
-    image_h = det.get("image_height_px")
+    image_w = det.image_width_px
+    image_h = det.image_height_px
     if not isinstance(image_w, (int, float)) or not isinstance(image_h, (int, float)):
         return name
     if image_w <= 1 or image_h <= 1:
@@ -461,8 +583,9 @@ def geometry_relabel_component_name(name: str, det: dict, *, allow_product_relab
     x_center_ratio = ((x1 + x2) / 2.0) / float(image_w)
     y_center_ratio = ((y1 + y2) / 2.0) / float(image_h)
     vertical_aspect = bh / bw
-    area_ratio = float(det.get("mask_fill_ratio", width_ratio * height_ratio))
-    score = float(det.get("score", 0.0))
+    mask_fill_ratio = det.mask_fill_ratio
+    area_ratio = float(mask_fill_ratio) if isinstance(mask_fill_ratio, (int, float)) else (width_ratio * height_ratio)
+    score = float(det.score)
 
     if name in PRODUCT_CLASS_COMPONENT_NAMES and not allow_product_relabel:
         return name
@@ -548,42 +671,37 @@ def is_only_product_class_components(components: list[Component]) -> bool:
 
 
 def components_from_detections(
-    detections: list[dict],
+    detections: list[RawDetection],
     labels: tuple[str, ...],
     threshold: float,
     detected_type: ProductType,
 ) -> list[Component]:
     # 1. Filter and normalize detections
-    candidates: list[dict] = []
+    candidates: list[DetectionCandidate] = []
     for det in detections:
-        class_id = det["class_id"]
-        score = det["score"]
+        class_id = det.class_id
+        score = det.score
         if class_id < 0 or class_id >= len(labels) or score < threshold:
             continue
  
         label = labels[class_id]
         base_name = canonical_component_name(label)
-        box = det["box"] # [x1, y1, x2, y2]
-        track_id = det.get("track_id")
-        view_index = det.get("view_index")
         normalized_box = normalize_box(
-            box,
-            det.get("image_width_px"),
-            det.get("image_height_px"),
+            det.box,
+            det.image_width_px,
+            det.image_height_px,
         )
 
-        candidates.append({
-            "base_name": base_name,
-            "is_product_label": product_type_from_label(label) is not None,
-            "det": det,
-            "box": box,
-            "normalized_box": normalized_box,
-            "score": score,
-            "track_id": track_id,
-            "view_index": view_index,
-        })
+        candidates.append(
+            DetectionCandidate(
+                base_name=base_name,
+                is_product_label=product_type_from_label(label) is not None,
+                detection=det,
+                normalized_box=normalized_box,
+            )
+        )
 
-    has_component_signal = any(not item["is_product_label"] for item in candidates)
+    has_component_signal = any(not item.is_product_label for item in candidates)
 
     # If the dataset currently has only product-level supervision, avoid
     # geometry relabel from product classes and rely on type priors.
@@ -601,52 +719,55 @@ def components_from_detections(
             )
         return merge_component_sets(anchored, minimum_components_for_type(detected_type))
 
-    valid_detections = []
+    valid_detections: list[StableDetection] = []
     for item in candidates:
-        base_name = str(item["base_name"])
-        det = item["det"]
+        base_name = item.base_name
+        det = item.detection
         allow_product_relabel = has_component_signal or _has_informative_mask(det)
         name = geometry_relabel_component_name(
             base_name,
             det,
             allow_product_relabel=allow_product_relabel,
         )
-        kind = component_kind(name)
+        box = item.normalized_box or normalize_box(det.box, None, None)
+        kind = component_kind(name, item.normalized_box)
 
-        valid_detections.append({
-            "name": name,
-            "kind": kind,
-            "box": item["normalized_box"] or normalize_box(item["box"], None, None),
-            "score": item["score"],
-            "track_id": item["track_id"],
-            "view_index": item["view_index"],
-        })
+        valid_detections.append(
+            StableDetection(
+                name=name,
+                kind=kind,
+                box=box,
+                score=float(det.score),
+                track_id=det.track_id,
+                view_index=det.view_index,
+            )
+        )
 
     if not valid_detections:
         return minimum_components_for_type(detected_type)
 
     # 2. Stabilize per-track class jitter by selecting one dominant label per track.
-    non_tracked: list[dict] = []
+    non_tracked: list[StableDetection] = []
     track_scores: dict[int, dict[str, float]] = {}
-    track_best_by_name: dict[int, dict[str, dict]] = {}
+    track_best_by_name: dict[int, dict[str, StableDetection]] = {}
 
     for det in valid_detections:
-        track_id = det.get("track_id")
+        track_id = det.track_id
         if not isinstance(track_id, int):
             non_tracked.append(det)
             continue
 
-        name = str(det["name"])
-        score = float(det["score"])
+        name = det.name
+        score = det.score
         score_bucket = track_scores.setdefault(track_id, {})
         score_bucket[name] = score_bucket.get(name, 0.0) + score
 
         best_by_name = track_best_by_name.setdefault(track_id, {})
         current_best = best_by_name.get(name)
-        if current_best is None or score > float(current_best.get("score", 0.0)):
+        if current_best is None or score > current_best.score:
             best_by_name[name] = det
 
-    stabilized: list[dict] = list(non_tracked)
+    stabilized: list[StableDetection] = list(non_tracked)
     for track_id, scores in track_scores.items():
         if not scores:
             continue
@@ -655,68 +776,119 @@ def components_from_detections(
         if winner is not None:
             stabilized.append(winner)
 
-    # 3. Aggregate by canonical component name and count quantity.
-    by_name: dict[str, dict] = {}
+
+    track_views: dict[int, set[int]] = {}
     for det in stabilized:
-        name = det["name"]
-        current = by_name.get(name)
-        view_index = det.get("view_index")
-        if current is None:
-            by_name[name] = {
-                "kind": det["kind"],
-                "quantity": 0,
-                "box": det["box"],
-                "best_score": det["score"],
-                "score_sum": float(det["score"]),
-                "score_count": 1,
-                "track_ids": set([det["track_id"]]) if isinstance(det.get("track_id"), int) else set(),
-                "view_ids": set([int(view_index)]) if isinstance(view_index, int) else set(),
-            }
-        else:
-            current["score_sum"] += float(det["score"])
-            current["score_count"] += 1
-            if isinstance(det.get("track_id"), int):
-                current["track_ids"].add(int(det["track_id"]))
-            if isinstance(view_index, int):
-                current["view_ids"].add(int(view_index))
+        if not isinstance(det.track_id, int) or not isinstance(det.view_index, int):
+            continue
+        track_views.setdefault(det.track_id, set()).add(det.view_index)
 
-            if det["score"] > current["best_score"]:
-                current["best_score"] = det["score"]
-                current["box"] = det["box"]
+    has_track_instances = any(len(views) > 1 for views in track_views.values())
 
-    for entry in by_name.values():
-        track_count = len(entry["track_ids"])
-        detection_count = int(entry["score_count"])
-        entry["quantity"] = max(1, track_count if track_count > 0 else detection_count)
+    if not has_track_instances:
+        by_name: dict[str, ComponentAggregate] = {}
+        for det in stabilized:
+            name = det.name
+            current = by_name.get(name)
+            view_index = det.view_index
+            if current is None:
+                by_name[name] = ComponentAggregate(
+                    kind=det.kind,
+                    box=det.box,
+                    best_score=det.score,
+                    score_sum=float(det.score),
+                    score_count=1,
+                    track_ids=set(),
+                    view_ids={int(view_index)} if isinstance(view_index, int) else set(),
+                )
+            else:
+                current.score_sum += float(det.score)
+                current.score_count += 1
+                if isinstance(view_index, int):
+                    current.view_ids.add(int(view_index))
 
-    components = [
-        Component(
-            id=component_id(name),
-            name=name,
-            kind=entry["kind"],
-            quantity=entry["quantity"],
-            box_corners=entry["box"],
-            position_label=infer_position_label(name, entry["box"]),
-            relative_position=(
-                round(box_center(entry["box"])[0] - 0.5, 4),
-                round(0.5 - box_center(entry["box"])[1], 4),
-                0.0,
-            ) if entry["box"] is not None else None,
-            bbox_3d=(
-                round(box_center(entry["box"])[0] - 0.5, 4),
-                round(0.5 - box_center(entry["box"])[1], 4),
-                0.0,
-                round(max(0.0, float(entry["box"][2]) - float(entry["box"][0])), 4),
-                round(max(0.0, float(entry["box"][3]) - float(entry["box"][1])), 4),
-                0.03,
-            ) if entry["box"] is not None else None,
-            orientation_euler_deg=(0.0, 0.0, 0.0),
-            visible_in_views=sorted(entry["view_ids"]),
-            confidence=round(min(1.0, entry["score_sum"] / max(entry["score_count"], 1)), 4),
-            uncertainty=round(1.0 - min(1.0, entry["score_sum"] / max(entry["score_count"], 1)), 4),
-        )
-        for name, entry in sorted(by_name.items())
-    ]
+                if det.score > current.best_score:
+                    current.best_score = det.score
+                    current.box = det.box
+
+        for entry in by_name.values():
+            entry.quantity = max(1, int(entry.score_count))
+
+        components = [
+            Component(
+                id=component_id(name),
+                name=name,
+                kind=entry.kind,
+                quantity=entry.quantity,
+                box_corners=entry.box,
+                position_label=infer_position_label(name, entry.box),
+                relative_position=(
+                    round(box_center(entry.box)[0] - 0.5, 4),
+                    round(0.5 - box_center(entry.box)[1], 4),
+                    0.0,
+                ) if entry.box is not None else None,
+                bbox_3d=(
+                    round(box_center(entry.box)[0] - 0.5, 4),
+                    round(0.5 - box_center(entry.box)[1], 4),
+                    0.0,
+                    round(max(0.0, float(entry.box[2]) - float(entry.box[0])), 4),
+                    round(max(0.0, float(entry.box[3]) - float(entry.box[1])), 4),
+                    0.03,
+                ) if entry.box is not None else None,
+                orientation_euler_deg=(0.0, 0.0, 0.0),
+                visible_in_views=sorted(entry.view_ids),
+                confidence=round(min(1.0, entry.score_sum / max(entry.score_count, 1)), 4),
+                uncertainty=round(1.0 - min(1.0, entry.score_sum / max(entry.score_count, 1)), 4),
+            )
+            for name, entry in sorted(by_name.items())
+        ]
+    else:
+        # Keep instance-level components for higher-fidelity downstream assembly.
+        def _instance_sort_key(det: StableDetection) -> tuple[str, int, int, float, float, float, float]:
+            box = det.box or (0.0, 0.0, 0.0, 0.0)
+            track_part = det.track_id if isinstance(det.track_id, int) else 10_000_000
+            view_part = det.view_index if isinstance(det.view_index, int) else 10_000_000
+            return (det.name, track_part, view_part, float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+
+        components = []
+        for idx, det in enumerate(sorted(stabilized, key=_instance_sort_key), start=1):
+            box = det.box
+            track_part = str(det.track_id) if isinstance(det.track_id, int) else "na"
+            view_part = str(det.view_index) if isinstance(det.view_index, int) else "na"
+            box_part = "na"
+            if box is not None:
+                box_part = ":".join(f"{float(value):.4f}" for value in box)
+
+            seed = f"{track_part}:{view_part}:{box_part}:{idx}"
+            view_ids = [int(det.view_index)] if isinstance(det.view_index, int) else []
+
+            components.append(
+                Component(
+                    id=component_id(det.name, seed=seed),
+                    name=det.name,
+                    kind=det.kind,
+                    quantity=1,
+                    box_corners=box,
+                    position_label=infer_position_label(det.name, box),
+                    relative_position=(
+                        round(box_center(box)[0] - 0.5, 4),
+                        round(0.5 - box_center(box)[1], 4),
+                        0.0,
+                    ) if box is not None else None,
+                    bbox_3d=(
+                        round(box_center(box)[0] - 0.5, 4),
+                        round(0.5 - box_center(box)[1], 4),
+                        0.0,
+                        round(max(0.0, float(box[2]) - float(box[0])), 4),
+                        round(max(0.0, float(box[3]) - float(box[1])), 4),
+                        0.03,
+                    ) if box is not None else None,
+                    orientation_euler_deg=(0.0, 0.0, 0.0),
+                    visible_in_views=view_ids,
+                    confidence=round(float(det.score), 4),
+                    uncertainty=round(1.0 - float(det.score), 4),
+                )
+            )
 
     # 4. Taxonomy prior merge only when detections are too sparse.
     if is_only_product_class_components(components):
@@ -726,7 +898,7 @@ def components_from_detections(
 
 
 def is_hardware_component(component: Component) -> bool:
-    return component.name in HARDWARE_PARTS or component.kind == ComponentKind.HARDWARE
+    return component.name in HARDWARE_PARTS
 
 
 def split_components(components: list[Component]) -> tuple[list[Component], list[Component]]:
@@ -769,12 +941,12 @@ def door_metadata(
 
 
 def has_uncertain_hardware(
-    detections: list[dict], labels: tuple[str, ...], threshold: float
+    detections: list[RawDetection], labels: tuple[str, ...], threshold: float
 ) -> bool:
     soft_threshold = min(0.95, threshold + 0.15)
     for det in detections:
-        class_id = det["class_id"]
-        score = det["score"]
+        class_id = det.class_id
+        score = det.score
         if class_id < 0 or class_id >= len(labels):
             continue
         name = normalize_component_name(labels[class_id])
@@ -791,26 +963,76 @@ def component_index(components: list[Component]) -> dict[str, Component]:
     return {component.id: component for component in components}
 
 
+def component_dimensions_prior(
+    kind: ComponentKind,
+    target_w_mm: float,
+    target_h_mm: float,
+    target_d_mm: float,
+    thickness_mm: float = 18.0,
+) -> tuple[float, float, float]:
+    if kind == ComponentKind.TOP_PANEL:
+        return (target_w_mm, thickness_mm, target_d_mm)
+    if kind == ComponentKind.BOTTOM_PANEL:
+        return (target_w_mm, thickness_mm, target_d_mm)
+    if kind == ComponentKind.BACK_PANEL:
+        return (target_w_mm * 0.95, target_h_mm * 0.92, thickness_mm)
+    if kind in {ComponentKind.LEFT_SIDE, ComponentKind.RIGHT_SIDE}:
+        return (thickness_mm, target_h_mm * 0.92, target_d_mm * 0.92)
+    if kind == ComponentKind.DIVIDER_PANEL:
+        return (thickness_mm, target_h_mm * 0.78, target_d_mm * 0.9)
+    if kind in {ComponentKind.FRONT_PANEL, ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT}:
+        return (target_w_mm * 0.22, target_h_mm * 0.14, thickness_mm)
+    if kind == ComponentKind.SHELF:
+        return (target_w_mm * 0.46, thickness_mm, target_d_mm * 0.85)
+    if kind in {
+        ComponentKind.LEFT_LEG_FRONT,
+        ComponentKind.RIGHT_LEG_FRONT,
+        ComponentKind.LEFT_LEG_BACK,
+        ComponentKind.RIGHT_LEG_BACK,
+    }:
+        return (thickness_mm * 2, target_h_mm * 0.92, thickness_mm * 2)
+
+    return (
+        max(target_w_mm * 0.25, thickness_mm * 2),
+        max(target_h_mm * 0.25, thickness_mm * 2),
+        max(target_d_mm * 0.15, thickness_mm),
+    )
+
+
 def build_joints(
     structural_components: list[Component],
     hardware_components: list[Component],
     door_type: DoorType,
+    face_index: dict[tuple[str, HardwareMountFace], str],
 ) -> list[JointEvidence]:
     joints: list[JointEvidence] = []
-    by_name = {component.name: component for component in [*structural_components, *hardware_components]}
+    all_components = [*structural_components, *hardware_components]
+    seen_pairs: set[tuple[str, str, JointType]] = set()
 
-    def comp_id(name: str) -> str:
-        component = by_name.get(name)
-        return component.id if component else component_id(name)
+    def components_by_name(name: str, pool: list[Component]) -> list[Component]:
+        return [component for component in pool if component.name == name]
 
-    def add_joint(parent_name: str, child_name: str, joint_type: JointType, count: int) -> None:
-        parent_id = comp_id(parent_name)
-        child_id = comp_id(child_name)
+    def components_by_kind(kind: ComponentKind, pool: list[Component]) -> list[Component]:
+        return [component for component in pool if component.kind == kind]
 
-        parent_component = by_name.get(parent_name)
-        child_component = by_name.get(child_name)
-        parent_anchor = parent_component.relative_position if parent_component is not None else (0.0, 0.0, 0.0)
-        child_anchor = child_component.relative_position if child_component is not None else (0.0, 0.0, 0.0)
+    def resolve_face_id(component: Component, relation: str) -> str:
+        normal = preferred_face(component.kind, relation)
+        return face_index.get((component.id, normal), face_id(component.id, normal))
+
+    def add_joint(parent_component: Component, child_component: Component, joint_type: JointType, count: int) -> None:
+        if parent_component.id == child_component.id:
+            return
+
+        pair_key = (parent_component.id, child_component.id, joint_type)
+        reverse_pair_key = (child_component.id, parent_component.id, joint_type)
+        if pair_key in seen_pairs or reverse_pair_key in seen_pairs:
+            return
+
+        parent_id = parent_component.id
+        child_id = child_component.id
+
+        parent_anchor = parent_component.relative_position if parent_component.relative_position is not None else (0.0, 0.0, 0.0)
+        child_anchor = child_component.relative_position if child_component.relative_position is not None else (0.0, 0.0, 0.0)
 
         axis = (0.0, 0.0, 1.0)
         degrees = 90.0
@@ -821,18 +1043,21 @@ def build_joints(
             axis = (0.0, 1.0, 0.0)
             degrees = 90.0
 
-        parent_conf = parent_component.confidence if parent_component is not None else 0.5
-        child_conf = child_component.confidence if child_component is not None else 0.5
+        parent_conf = parent_component.confidence
+        child_conf = child_component.confidence
         joint_conf = round(min(1.0, 0.5 * (parent_conf + child_conf)), 4)
 
         view_ids = sorted(
-            set(parent_component.visible_in_views if parent_component is not None else [])
-            | set(child_component.visible_in_views if child_component is not None else [])
+            set(parent_component.visible_in_views)
+            | set(child_component.visible_in_views)
         )
 
         joints.append(
             JointEvidence(
                 id=joint_id(parent_id, child_id, joint_type),
+                parent_face_id=resolve_face_id(parent_component, "parent"),
+                child_face_id=resolve_face_id(child_component, "child"),
+                joint_rule=joint_rule_from_type(joint_type),
                 parent_component_id=parent_id,
                 child_component_id=child_id,
                 joint_type=joint_type,
@@ -846,33 +1071,84 @@ def build_joints(
                 evidence_view_ids=view_ids,
             )
         )
+        seen_pairs.add(pair_key)
 
-    side_qty = component_quantity(structural_components, "side_panel")
-    shelf_qty = component_quantity(structural_components, "shelf_panel")
-    door_qty = component_quantity(structural_components, "door_panel")
-    hinge_qty = component_quantity(hardware_components, "hinge")
-    leg_qty = component_quantity(structural_components, "leg")
-    drawer_qty = component_quantity(structural_components, "drawer_box")
+    left_sides = components_by_kind(ComponentKind.LEFT_SIDE, structural_components)
+    right_sides = components_by_kind(ComponentKind.RIGHT_SIDE, structural_components)
+    side_supports = [*left_sides, *right_sides]
+    dividers = components_by_kind(ComponentKind.DIVIDER_PANEL, structural_components)
+    tops = components_by_kind(ComponentKind.TOP_PANEL, structural_components)
+    bottoms = components_by_kind(ComponentKind.BOTTOM_PANEL, structural_components)
+    shelves = components_by_kind(ComponentKind.SHELF, structural_components)
+    backs = components_by_kind(ComponentKind.BACK_PANEL, structural_components)
+    doors = components_by_kind(ComponentKind.DOOR_PANEL, structural_components)
+    drawer_fronts = components_by_kind(ComponentKind.DRAWER_FRONT, structural_components)
+    front_panels = components_by_kind(ComponentKind.FRONT_PANEL, structural_components)
+    legs = [
+        component
+        for component in structural_components
+        if component.kind in {
+            ComponentKind.LEFT_LEG_FRONT,
+            ComponentKind.RIGHT_LEG_FRONT,
+            ComponentKind.LEFT_LEG_BACK,
+            ComponentKind.RIGHT_LEG_BACK,
+        }
+    ]
 
-    if side_qty >= 2 and component_quantity(structural_components, "top_panel") >= 1:
-        add_joint("side_panel", "top_panel", JointType.CAM_LOCK, 2)
-    if side_qty >= 2 and component_quantity(structural_components, "bottom_panel") >= 1:
-        add_joint("side_panel", "bottom_panel", JointType.CAM_LOCK, 2)
-    if side_qty >= 2 and shelf_qty > 0:
-        add_joint("side_panel", "shelf_panel", JointType.SHELF_PIN, max(2, shelf_qty * 2))
-    if component_quantity(structural_components, "back_panel") > 0:
-        add_joint("cabinet_body", "back_panel", JointType.SCREW, 12)
-    if door_qty > 0:
-        if door_type == DoorType.SLIDING or any(c.name == "sliding_door_track" for c in hardware_components):
-            add_joint("cabinet_body", "door_panel", JointType.SLIDING_TRACK, max(2, door_qty))
-        else:
-            add_joint("side_panel", "door_panel", JointType.HINGE, max(2, door_qty * 2))
-    elif hinge_qty > 0:
-        add_joint("side_panel", "door_panel", JointType.HINGE, max(2, hinge_qty * 2))
-    if drawer_qty > 0:
-        add_joint("cabinet_body", "drawer_box", JointType.TELESCOPIC_SLIDE, max(2, drawer_qty * 2))
-    if leg_qty > 0 and component_quantity(structural_components, "top_panel") > 0:
-        add_joint("top_panel", "leg", JointType.BRACKET, max(4, leg_qty))
+    primary_vertical_supports = side_supports if side_supports else dividers
+    if not primary_vertical_supports:
+        primary_vertical_supports = front_panels
+
+    for support in [*side_supports, *dividers]:
+        for top in tops:
+            add_joint(support, top, JointType.CAM_LOCK, 2)
+        for bottom in bottoms:
+            add_joint(support, bottom, JointType.CAM_LOCK, 2)
+
+    for shelf in shelves:
+        for support in primary_vertical_supports[:2]:
+            add_joint(support, shelf, JointType.SHELF_PIN, 2)
+
+    for back in backs:
+        support_targets = [*side_supports, *dividers, *tops, *bottoms]
+        if not support_targets:
+            support_targets = front_panels
+        for support in support_targets[:4]:
+            add_joint(support, back, JointType.SCREW, 4)
+
+    if doors:
+        use_sliding = door_type == DoorType.SLIDING or bool(components_by_name("sliding_door_track", hardware_components))
+        door_joint_type = JointType.SLIDING_TRACK if use_sliding else JointType.HINGE
+        mount_supports = side_supports if side_supports else primary_vertical_supports
+        if not mount_supports:
+            mount_supports = structural_components
+        for door in doors:
+            for support in mount_supports[:2]:
+                add_joint(support, door, door_joint_type, 2)
+    elif components_by_name("hinge", hardware_components):
+        mount_supports = side_supports if side_supports else primary_vertical_supports
+        if not mount_supports:
+            mount_supports = structural_components
+        hinge_targets = doors or front_panels or drawer_fronts
+        for door in hinge_targets[:1]:
+            for support in mount_supports[:2]:
+                add_joint(support, door, JointType.HINGE, 2)
+
+    drawer_supports = [*dividers, *side_supports, *front_panels, *tops]
+    for drawer in drawer_fronts:
+        for support in drawer_supports[:2]:
+            add_joint(support, drawer, JointType.TELESCOPIC_SLIDE, 2)
+
+    if legs and tops:
+        for leg in legs:
+            for top in tops[:1]:
+                add_joint(top, leg, JointType.BRACKET, 2)
+
+    # Ensure we never return a disconnected graph when structural components exist.
+    if not joints and len(all_components) >= 2:
+        parent_component = all_components[0]
+        child_component = all_components[1]
+        add_joint(parent_component, child_component, JointType.CAM_LOCK, 2)
 
     return joints
 
@@ -980,7 +1256,7 @@ def assemble_project(
     if not evidence:
         raise HTTPException(status_code=422, detail="No visual evidence provided")
 
-    all_detections: list[dict] = []
+    all_detections: list[RawDetection] = []
     for item in evidence:
         all_detections.extend(item.raw_detections)
 
@@ -992,8 +1268,8 @@ def assemble_project(
         image_component_signal = 0
 
         for det in item.raw_detections:
-            class_id = det.get("class_id", -1)
-            score = float(det.get("score", 0.0))
+            class_id = det.class_id
+            score = float(det.score)
             if not isinstance(class_id, int) or class_id < 0 or class_id >= len(labels):
                 continue
 
@@ -1057,28 +1333,47 @@ def assemble_project(
     )
     components = components_from_detections(all_detections, labels, component_threshold, detected_type)
     structural_components, hardware_components = split_components(components)
+    faces, face_index = build_faces(components)
     
     vis, cov, unknown_int = interior_visibility(structural_components, hardware_components)
     door_type, _ = door_metadata(structural_components, hardware_components, vis)
     uncertain_hw = has_uncertain_hardware(all_detections, labels, component_threshold)
     
-    joints = build_joints(structural_components, hardware_components, door_type)
+    joints = build_joints(structural_components, hardware_components, door_type, face_index)
     hardware = build_hardware(joints, uncertain_hw)
     
     width, height, depth = estimate_dimensions_multi(evidence)
 
     # Fill coarse real-world dimensions for deterministic downstream layout.
     for component in components:
-        if component.box_corners is None:
-            continue
-        x1, y1, x2, y2 = component.box_corners
-        span_x = max(0.01, x2 - x1)
-        span_y = max(0.01, y2 - y1)
-        component.dimensions_mm = (
-            round(span_x * width, 2),
-            round(span_y * height, 2),
-            18.0,
-        )
+        if component.box_corners is not None:
+            x1, y1, x2, y2 = component.box_corners
+            span_x = max(0.01, x2 - x1)
+            span_y = max(0.01, y2 - y1)
+            component.dimensions_mm = (
+                round(span_x * width, 2),
+                round(span_y * height, 2),
+                18.0,
+            )
+        else:
+            prior_w, prior_h, prior_d = component_dimensions_prior(
+                component.kind,
+                target_w_mm=width,
+                target_h_mm=height,
+                target_d_mm=depth,
+            )
+            component.dimensions_mm = (
+                round(prior_w, 2),
+                round(prior_h, 2),
+                round(prior_d, 2),
+            )
+        component.width, component.height, component.depth = component.dimensions_mm
+
+    for component in components:
+        if component.width <= 0 or component.height <= 0 or component.depth <= 0:
+            component.width = max(component.width, 1.0)
+            component.height = max(component.height, 1.0)
+            component.depth = max(component.depth, 1.0)
 
     index = component_index(components)
     constraints_report, review_flags = build_constraints_report(components, joints)
@@ -1101,6 +1396,7 @@ def assemble_project(
         suggested_height=height,
         suggested_depth=depth,
         components=components,
+        faces=faces,
         component_index=index,
         interior=InteriorAssessment(
             visibility=vis,
