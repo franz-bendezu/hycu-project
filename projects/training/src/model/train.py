@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import joblib
@@ -14,6 +15,11 @@ from ultralytics import YOLO
 
 
 TRAINING_ROOT = Path(__file__).resolve().parents[2]
+RUNS_ROOT = TRAINING_ROOT / "runs"
+
+
+def _resolve_from_training_root(path: Path) -> Path:
+    return path if path.is_absolute() else (TRAINING_ROOT / path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +65,17 @@ def train_detector(args: argparse.Namespace) -> Path:
     )
 
     run_dir = Path(result.save_dir)
+    expected_root = RUNS_ROOT.resolve()
+    try:
+        run_dir.resolve().relative_to(expected_root)
+    except ValueError:
+        fallback_dir = (args.project_dir / run_dir.name).resolve()
+        fallback_dir.parent.mkdir(parents=True, exist_ok=True)
+        if fallback_dir.exists():
+            shutil.rmtree(fallback_dir)
+        shutil.move(str(run_dir), str(fallback_dir))
+        run_dir = fallback_dir
+
     best_weights = run_dir / "weights" / "best.pt"
     if not best_weights.exists():
         raise FileNotFoundError(f"YOLO training completed but best checkpoint missing: {best_weights}")
@@ -118,6 +135,12 @@ def train_regression(args: argparse.Namespace) -> Path | None:
 
 def main() -> None:
     args = parse_args()
+    args.dataset_yaml = _resolve_from_training_root(args.dataset_yaml)
+    args.project_dir = _resolve_from_training_root(args.project_dir)
+    if args.regression_csv is not None:
+        args.regression_csv = _resolve_from_training_root(args.regression_csv)
+    args.regression_out_dir = _resolve_from_training_root(args.regression_out_dir)
+
     args.project_dir.mkdir(parents=True, exist_ok=True)
 
     best_detector = train_detector(args)

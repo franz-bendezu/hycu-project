@@ -50,26 +50,29 @@ bash scripts/components_pipeline.sh run
 make pipeline-components
 ```
 
-2. Collect data and metadata (Scrapers):
+2. Collect data and metadata (Promart-only scraper):
 
 ```bash
-python src/data_collection/scrapers/collect_data.py \
-	--sources-json src/data_collection/scrapers/sources.example.json \
-	--output-dir datasets/raw \
-	--metadata-csv datasets/raw/metadata.csv
-```
+# 1) Collect product metadata + per-product images into datasets/raw/promart_products
+python src/data_collection/scrapers/collect_promart_furniture_metadata.py \
+	--output-csv datasets/raw/promart_flat_wood_metadata.csv \
+	--output-jsonl datasets/raw/promart_flat_wood_metadata.jsonl \
+	--images-output-dir datasets/raw/promart_products \
+	--images-metadata-csv datasets/raw/promart_product_images_metadata.csv \
+	--api-only
 
-Real open-data collection (executed in this workspace):
+# Shelf/estante-focused Promart collection (melamine filter preset)
+python src/data_collection/scrapers/collect_promart_furniture_metadata.py \
+	--api-only \
+	--category-id 890 \
+	--api-ft "melamina,melamine,estante,estantes" \
+	--api-fq "C:/890/391/429/" \
+	--output-csv datasets/raw/promart_flat_wood_metadata_shelves.csv \
+	--output-jsonl datasets/raw/promart_flat_wood_metadata_shelves.jsonl \
+	--images-output-dir datasets/raw/promart_products_shelves \
+	--images-metadata-csv datasets/raw/promart_product_images_metadata_shelves.csv
 
-```bash
-python src/data_collection/scrapers/collect_wikimedia_open.py \
-	--queries-json src/data_collection/scrapers/commons_queries.json \
-	--output-dir datasets/raw/images \
-	--metadata-csv datasets/raw/metadata_open.csv \
-	--per-category 6 \
-	--thumb-width 320
-
-# Build a balanced raw cabinet/desk/shelf set from Promart metadata/images.
+# 2) Build a balanced raw cabinet/desk/shelf set from Promart metadata/images.
 python src/data_collection/build_promart_balanced_raw_dataset.py \
 	--images-metadata-csv datasets/raw/promart_product_images_metadata.csv \
 	--products-metadata-csv datasets/raw/promart_flat_wood_metadata.csv \
@@ -82,6 +85,8 @@ python src/data_collection/build_promart_balanced_raw_dataset.py \
 	--mode copy
 ```
 
+Legacy non-Promart scrapers are archived under `src/data_collection/scrapers/legacy/`.
+
 Notes for balancing behavior:
 - `--strategy cap`: each class is sampled independently up to `--max-per-class`.
 - `--strategy strict-balance`: all classes are sampled to a shared cap based on the smallest available class.
@@ -91,7 +96,7 @@ Notes for balancing behavior:
 
 ```bash
 python src/model/train.py \
-	--dataset-yaml datasets/yolo_dataset.yaml \
+	--dataset-yaml datasets/yolo_dataset_components_active.yaml \
 	--regression-csv datasets/regression_features.csv \
 	--yolo-model yolo11n.pt \
 	--epochs 30 \
@@ -107,9 +112,7 @@ Standardized automation runner (recommended for repeatable ML workflow):
 ```bash
 python train/run_pipeline.py \
 	--config configs/components_pipeline_production.yaml \
-	--prepare-dataset \
-	--prepare-class-profile components \
-	--dataset-yaml datasets/yolo_dataset_components.yaml \
+	--dataset-yaml datasets/yolo_dataset_components_active.yaml \
 	--yolo-model yolo11n.pt \
 	--epochs 40 \
 	--batch 16 \
@@ -176,43 +179,16 @@ The recommended daily command for component model iteration is:
 make pipeline-components
 ```
 
-Use `datasets/yolo_dataset.example.yaml` and `datasets/regression_features.example.csv` as templates.
+Use `datasets/regression_features.example.csv` as a template for regression data.
 
-Labeling preparation before training (build train/val folders + queue CSV + empty `.txt` labels):
-
-```bash
-python src/data_collection/prepare_yolo_dataset.py \
-	--raw-root datasets/raw/images \
-	--out-root datasets/yolo \
-	--val-ratio 0.2 \
-	--mode copy \
-	--clean
-```
-
-For component-level detection classes (door panel, side panel, hinge, slides, etc.),
-generate the component class YAML profile:
-
-```bash
-python src/data_collection/prepare_yolo_dataset.py \
-	--raw-root datasets/raw/images \
-	--out-root datasets/yolo \
-	--val-ratio 0.2 \
-	--mode copy \
-	--class-profile components
-```
-
-Then annotate files listed in `datasets/yolo/labeling_queue.csv` and save YOLO boxes into matching paths under:
-- `datasets/yolo/labels/train/*.txt`
-- `datasets/yolo/labels/val/*.txt`
-
-Generated dataset YAML for training is written to `datasets/yolo_dataset.yaml`.
-For component profile it is written to `datasets/yolo_dataset_components.yaml`.
+Dataset source for component training is `datasets/yolo_components_labeled` with YAML:
+- `datasets/yolo_dataset_components_active.yaml`
 
 Component detection training rerun (outputs remain inside `projects/training/runs/train`):
 
 ```bash
 python src/model/train.py \
-	--dataset-yaml datasets/yolo_dataset_components.yaml \
+	--dataset-yaml datasets/yolo_dataset_components_active.yaml \
 	--yolo-model yolo11n.pt \
 	--epochs 40 \
 	--project-dir runs/train \

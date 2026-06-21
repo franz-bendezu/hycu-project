@@ -169,6 +169,17 @@ def parse_args() -> argparse.Namespace:
         help="Extra API fq filters, repeat flag for multiple filters (example: specificationFilter_10973:MDP)",
     )
     parser.add_argument(
+        "--api-fq-json",
+        type=Path,
+        default=None,
+        help="Optional JSON file with an array of API fq filters",
+    )
+    parser.add_argument(
+        "--api-ft",
+        default="",
+        help="Optional catalog API full-text query (ft parameter)",
+    )
+    parser.add_argument(
         "--api-only",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -349,6 +360,33 @@ def load_category_ids(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def load_api_fq_filters(args: argparse.Namespace) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for fq in args.api_fq:
+        value = str(fq).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+
+    if args.api_fq_json is not None:
+        if not args.api_fq_json.exists():
+            raise FileNotFoundError(f"API fq JSON not found: {args.api_fq_json}")
+        data = json.loads(args.api_fq_json.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise ValueError("--api-fq-json must contain a JSON array")
+        for item in data:
+            value = str(item).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+
+    return out
+
+
 def iter_product_ids(
     session: requests.Session,
     *,
@@ -393,6 +431,7 @@ def iter_products_from_api(
     session: requests.Session,
     *,
     category_id: str,
+    ft: str,
     extra_fq: list[str],
     timeout: float,
     sleep: float,
@@ -414,6 +453,8 @@ def iter_products_from_api(
             ("fq", f"C:/{category_id}/"),
             ("fq", "isAvailablePerSalesChannel_2:1"),
         ]
+        if ft.strip():
+            params.append(("ft", ft.strip()))
         for fq in extra_fq:
             params.append(("fq", fq))
 
@@ -807,6 +848,7 @@ def main() -> None:
 
     seed_category_urls = load_category_urls(args)
     explicit_category_ids = load_category_ids(args)
+    extra_fq_filters = load_api_fq_filters(args)
     all_category_urls: list[str] = []
     seen_category_urls: set[str] = set()
     if not args.api_only:
@@ -836,7 +878,8 @@ def main() -> None:
         products = iter_products_from_api(
             session,
             category_id=category_id,
-            extra_fq=args.api_fq,
+            ft=args.api_ft,
+            extra_fq=extra_fq_filters,
             timeout=args.timeout,
             sleep=args.sleep,
             page_size=args.page_size,

@@ -172,7 +172,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     prepare_class_profile = str(_pick(args.prepare_class_profile, cfg, "prepare_class_profile", "components"))
     prepare_clean = bool(_pick(args.prepare_clean, cfg, "prepare_clean", False))
     validate_dataset = bool(_pick(args.validate_dataset, cfg, "validate_dataset", True))
-    dataset_yaml = _resolve_path(Path(_pick(args.dataset_yaml, cfg, "dataset_yaml", "datasets/yolo_dataset_components.yaml")))
+    dataset_yaml = _resolve_path(Path(_pick(args.dataset_yaml, cfg, "dataset_yaml", "datasets/yolo_dataset_components_active.yaml")))
     yolo_model = str(_pick(args.yolo_model, cfg, "yolo_model", "yolo11n.pt"))
     epochs = int(_pick(args.epochs, cfg, "epochs", 40))
     imgsz = int(_pick(args.imgsz, cfg, "imgsz", 640))

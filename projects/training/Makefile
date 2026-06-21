@@ -16,7 +16,7 @@ pipeline-components-prod:
 	$(MAKE) pipeline-components
 
 validate-components:
-	$(PYTHON) src/model/validate_dataset.py --dataset-yaml datasets/yolo_dataset_components.yaml
+	$(PYTHON) src/model/validate_dataset.py --dataset-yaml datasets/yolo_dataset_components_active.yaml
 
 dry-run-components:
 	$(PYTHON) src/orchestration/run_pipeline.py --config configs/components_pipeline_production.yaml --dry-run

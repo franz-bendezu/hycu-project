@@ -1,9 +1,9 @@
-prepare_dataset: true
+prepare_dataset: false
 prepare_class_profile: components
 prepare_clean: false
 validate_dataset: true
 
-dataset_yaml: datasets/yolo_dataset_components.yaml
+dataset_yaml: datasets/yolo_dataset_components_active.yaml
 yolo_model: yolo11s.pt # Upgraded from nano to small for better feature extraction
 epochs: 150 # Increased for better convergence
 imgsz: 1024 # Increased resolution for small part detection (hinges, slides)

@@ -31,7 +31,7 @@ case "$MODE" in
     ;;
   validate)
     cd "${TRAINING_DIR}"
-    "${PYTHON_BIN}" src/model/validate_dataset.py --dataset-yaml datasets/yolo_dataset_components.yaml
+    "${PYTHON_BIN}" src/model/validate_dataset.py --dataset-yaml datasets/yolo_dataset_components_active.yaml
     ;;
   prepare)
     cd "${TRAINING_DIR}"

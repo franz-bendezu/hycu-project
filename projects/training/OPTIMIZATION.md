@@ -42,7 +42,7 @@ make pipeline-components
 To run only the training script manually:
 ```bash
 python src/model/train.py \
-  --dataset-yaml datasets/yolo_dataset_components.yaml \
+  --dataset-yaml datasets/yolo_dataset_components_active.yaml \
   --yolo-model yolo11s.pt \
   --imgsz 1024 \
   --epochs 150 \
