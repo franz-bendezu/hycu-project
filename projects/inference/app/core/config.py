@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from app.schemas import SegmentationBackend
+
 SUPPORTED_TYPES = ("cabinet", "desk", "shelf")
 
 
@@ -135,11 +137,147 @@ COMPONENT_ALIAS_CONTAINS = (
     ("rod", "hanger_rod"),
 )
 
+
+def _resolve_component_dataset_yaml_path() -> Path | None:
+    configured = os.getenv("INFERENCE_COMPONENT_DATASET_YAML", "").strip()
+    if configured:
+        return Path(configured)
+
+    default_path = (
+        Path(__file__).resolve().parents[3]
+        / "training"
+        / "datasets"
+        / "yolo_dataset_components_labeled.yaml"
+    )
+    return default_path
+
+
+def _resolve_dataset_root(dataset_yaml: Path, yaml_doc: dict) -> Path:
+    dataset_root = yaml_doc.get("path")
+    if not isinstance(dataset_root, str) or not dataset_root.strip():
+        raise RuntimeError("Component dataset YAML must define a non-empty 'path'")
+
+    root = Path(dataset_root)
+    if root.is_absolute():
+        return root
+
+    candidates = [
+        (dataset_yaml.parent / root).resolve(),
+        (dataset_yaml.parents[1] / root).resolve(),
+        (Path.cwd() / root).resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _component_supervision_available() -> bool:
+    dataset_yaml = _resolve_component_dataset_yaml_path()
+    if dataset_yaml is None or not dataset_yaml.exists():
+        return True
+
+    try:
+        yaml_doc = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8"))
+        if not isinstance(yaml_doc, dict):
+            return True
+
+        dataset_root = _resolve_dataset_root(dataset_yaml, yaml_doc)
+        labels_root = dataset_root / "labels"
+        if not labels_root.exists():
+            return True
+
+        for split in ("train", "val"):
+            split_dir = labels_root / split
+            if not split_dir.exists():
+                continue
+            for label_file in split_dir.glob("*.txt"):
+                text = label_file.read_text(encoding="utf-8").strip()
+                if not text:
+                    continue
+                for line in text.splitlines():
+                    parts = line.strip().split()
+                    if not parts:
+                        continue
+                    try:
+                        class_id = int(parts[0])
+                    except ValueError:
+                        continue
+                    if class_id >= 3:
+                        return True
+    except Exception:
+        # If dataset probing fails, avoid blocking component inference.
+        return True
+
+    return False
+
+
+COMPONENT_SUPERVISION_AVAILABLE = _component_supervision_available()
+
+
+def _as_bool(raw: str | None, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_latest_training_onnx() -> Path | None:
+    training_root = Path(__file__).resolve().parents[3] / "training"
+    latest_pointer = training_root / "runs" / "train" / "LATEST_RUN.txt"
+
+    # First try the explicit latest-run pointer when it exists.
+    if latest_pointer.exists():
+        try:
+            pointed = latest_pointer.read_text(encoding="utf-8").strip()
+            if pointed:
+                run_dir = Path(pointed)
+                if not run_dir.is_absolute():
+                    run_dir = (latest_pointer.parent / pointed).resolve()
+                candidate = run_dir / "weights" / "best.onnx"
+                if candidate.exists():
+                    return candidate
+        except Exception:
+            pass
+
+    # Fallback to scanning for newest exported ONNX in training runs.
+    runs_root = training_root / "runs" / "train"
+    if not runs_root.exists():
+        return None
+
+    candidates = list(runs_root.glob("*/weights/best.onnx"))
+    if not candidates:
+        return None
+
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except Exception:
+        return None
+
 def get_detector_model_path() -> Path:
     override = os.getenv("INFERENCE_DETECTOR_ONNX")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[2] / "models" / "detector.onnx"
+
+    bundled = Path(__file__).resolve().parents[2] / "models" / "detector.onnx"
+    prefer_latest = _as_bool(os.getenv("INFERENCE_PREFER_LATEST_TRAINING_ONNX"), default=True)
+    if not prefer_latest:
+        return bundled
+
+    latest_training = _resolve_latest_training_onnx()
+    if latest_training is None:
+        return bundled
+
+    if not bundled.exists():
+        return latest_training
+
+    try:
+        if latest_training.stat().st_mtime > bundled.stat().st_mtime:
+            return latest_training
+    except Exception:
+        # If stat fails for any reason, keep deterministic bundled fallback.
+        return bundled
+
+    return bundled
 
 def get_detector_labels() -> tuple[str, ...]:
     raw = os.getenv("INFERENCE_LABELS")
@@ -170,3 +308,41 @@ def get_execution_providers() -> list[str]:
         # Default to trying CUDA then falling back to CPU
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def get_segmentation_backend() -> SegmentationBackend:
+    raw = os.getenv("INFERENCE_SEGMENTATION_BACKEND", SegmentationBackend.BOX_RASTERIZER.value)
+    try:
+        return SegmentationBackend(raw.strip().lower())
+    except ValueError:
+        return SegmentationBackend.BOX_RASTERIZER
+
+
+def get_sam2_model_path() -> Path | None:
+    raw = os.getenv("INFERENCE_SAM2_MODEL_PATH", "").strip()
+    if not raw:
+        return None
+    return Path(raw)
+
+
+def get_escalation_geometry_threshold() -> float:
+    raw = os.getenv("INFERENCE_ESCALATE_GEOMETRY_THRESHOLD", "0.45")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.45
+    return min(1.0, max(0.0, value))
+
+
+def get_escalation_mvs_threshold() -> float:
+    raw = os.getenv("INFERENCE_ESCALATE_MVS_THRESHOLD", "0.65")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.65
+    return min(1.0, max(0.0, value))
+
+
+def get_enable_heavy_refinement() -> bool:
+    raw = os.getenv("INFERENCE_ENABLE_HEAVY_REFINEMENT", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}

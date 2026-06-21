@@ -35,8 +35,8 @@ product_type_component_minimums:
   wardrobe: {side_panel: 2, top_panel: 1, bottom_panel: 1, back_panel: 1, door_panel: 2}
   bookcase: {side_panel: 2, top_panel: 1, bottom_panel: 1, shelf_panel: 3, back_panel: 1}
   shelf: {side_panel: 2, top_panel: 1, bottom_panel: 1, shelf_panel: 2}
-  desk: {top_panel: 1, leg: 2, front_apron: 1}
-  table: {top_panel: 1, leg: 4}
+  desk: {top_panel: 1, side_panel: 2, divider_panel: 1, front_apron: 1, drawer_front: 4}
+  table: {top_panel: 1, leg: 4, front_apron: 2}
   nightstand: {side_panel: 2, top_panel: 1, bottom_panel: 1, drawer_front: 1}
   dresser: {side_panel: 2, top_panel: 1, bottom_panel: 1, drawer_front: 3}
   sideboard: {side_panel: 2, top_panel: 1, bottom_panel: 1, door_panel: 2}

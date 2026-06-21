@@ -17,6 +17,15 @@ type PanelMeshModel = {
   tone: "panel" | "shelf" | "back" | "door" | "drawer" | "divider" | "fallback";
 };
 
+type HardwareMarker = {
+  id: string;
+  label: string;
+  position: [number, number, number];
+  kind: "screw" | "cam_lock" | "slide" | "hinge" | "generic";
+  size: number;
+  color: string;
+};
+
 enum PanelSemantic {
   LEFT_LEG = "left_leg",
   RIGHT_LEG = "right_leg",
@@ -51,6 +60,24 @@ enum ViewerComponentKind {
 }
 
 const SCALE_TO_METERS = 0.001;
+const MAX_RENDER_HARDWARE = 200;
+
+function isStructuralComponent(component: ProjectModel["components"][number] | undefined): boolean {
+  if (!component) {
+    return false;
+  }
+  if (component.category === "structural") {
+    return true;
+  }
+  return (
+    component.kind === "left_side"
+    || component.kind === "right_side"
+    || component.kind === "top_panel"
+    || component.kind === "bottom_panel"
+    || component.kind === "back_panel"
+    || component.kind === "divider_panel"
+  );
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -274,63 +301,64 @@ function buildPanelMeshes(model: ProjectModel): PanelMeshModel[] {
     }
 
     if (semantic === PanelSemantic.LEFT_SIDE) {
+      const fallbackPosition: [number, number, number] = [
+        ((-modelWidth / 2) + compWidth / 2) * SCALE_TO_METERS,
+        0,
+        0,
+      ];
       return {
         id: component.id,
         label: component.kind,
-        size: [thickness * SCALE_TO_METERS, modelHeight * SCALE_TO_METERS, modelDepth * SCALE_TO_METERS],
-        position: [
-          ((-modelWidth / 2) + thickness / 2) * SCALE_TO_METERS,
-          0,
-          0,
-        ],
+        size: [compWidth * SCALE_TO_METERS, compHeight * SCALE_TO_METERS, compDepth * SCALE_TO_METERS],
+        position: resolveJointPosition(component.id, fallbackPosition, true, true, true),
         tone: "panel",
       };
     }
 
     if (semantic === PanelSemantic.RIGHT_SIDE) {
+      const fallbackPosition: [number, number, number] = [
+        ((modelWidth / 2) - compWidth / 2) * SCALE_TO_METERS,
+        0,
+        0,
+      ];
       return {
         id: component.id,
         label: component.kind,
-        size: [thickness * SCALE_TO_METERS, modelHeight * SCALE_TO_METERS, modelDepth * SCALE_TO_METERS],
-        position: [
-          ((modelWidth / 2) - thickness / 2) * SCALE_TO_METERS,
-          0,
-          0,
-        ],
+        size: [compWidth * SCALE_TO_METERS, compHeight * SCALE_TO_METERS, compDepth * SCALE_TO_METERS],
+        position: resolveJointPosition(component.id, fallbackPosition, true, true, true),
         tone: "panel",
       };
     }
 
     if (semantic === PanelSemantic.TOP) {
+      const fallbackPosition: [number, number, number] = [0, ((modelHeight / 2) - compHeight / 2) * SCALE_TO_METERS, 0];
       return {
         id: component.id,
         label: component.kind,
-        size: [modelWidth * SCALE_TO_METERS, thickness * SCALE_TO_METERS, modelDepth * SCALE_TO_METERS],
-        position: [0, ((modelHeight / 2) - thickness / 2) * SCALE_TO_METERS, 0],
+        size: [compWidth * SCALE_TO_METERS, compHeight * SCALE_TO_METERS, compDepth * SCALE_TO_METERS],
+        position: resolveJointPosition(component.id, fallbackPosition, true, true, true),
         tone: "panel",
       };
     }
 
     if (semantic === PanelSemantic.BOTTOM) {
+      const fallbackPosition: [number, number, number] = [0, ((-modelHeight / 2) + compHeight / 2) * SCALE_TO_METERS, 0];
       return {
         id: component.id,
         label: component.kind,
-        size: [modelWidth * SCALE_TO_METERS, thickness * SCALE_TO_METERS, modelDepth * SCALE_TO_METERS],
-        position: [0, ((-modelHeight / 2) + thickness / 2) * SCALE_TO_METERS, 0],
+        size: [compWidth * SCALE_TO_METERS, compHeight * SCALE_TO_METERS, compDepth * SCALE_TO_METERS],
+        position: resolveJointPosition(component.id, fallbackPosition, true, true, true),
         tone: "panel",
       };
     }
 
     if (semantic === PanelSemantic.BACK) {
+      const fallbackPosition: [number, number, number] = [0, 0, ((-modelDepth / 2) + compDepth / 2) * SCALE_TO_METERS];
       return {
         id: component.id,
         label: component.kind,
-        size: [
-          Math.max(thickness, modelWidth - thickness * 2) * SCALE_TO_METERS,
-          Math.max(thickness, modelHeight - thickness * 2) * SCALE_TO_METERS,
-          thickness * SCALE_TO_METERS,
-        ],
-        position: [0, 0, ((-modelDepth / 2) + thickness / 2) * SCALE_TO_METERS],
+        size: [compWidth * SCALE_TO_METERS, compHeight * SCALE_TO_METERS, compDepth * SCALE_TO_METERS],
+        position: resolveJointPosition(component.id, fallbackPosition, true, true, true),
         tone: "back",
       };
     }
@@ -369,11 +397,10 @@ function buildPanelMeshes(model: ProjectModel): PanelMeshModel[] {
       
       const fallbackPosition: [number, number, number] = [xPos * SCALE_TO_METERS, 0, (modelDepth / 2 - Math.max(compDepth, thickness / 2) / 2) * SCALE_TO_METERS];
       const jointMm = resolveJointMillimeterPosition(component.id);
-      const isMixedFacade = (model.product.door_count || 0) === 3 && (model.product.drawer_count || 0) === 1;
       let doorTone: PanelMeshModel["tone"] = "door";
-      if (isMixedFacade && jointMm) {
-        // Match common mixed-facade look: top-left + right doors dark, bottom-left wood tone.
-        if (jointMm.x <= 0 && jointMm.y < 0) {
+      if (jointMm) {
+        // Keep a slight hue distinction for low-left doors when joints indicate split fronts.
+        if (jointMm.x <= 0 && jointMm.y < 0 && model.product.drawer_count && model.product.drawer_count > 0) {
           doorTone = "panel";
         }
       }
@@ -497,10 +524,131 @@ function toneColor(tone: PanelMeshModel["tone"], selected: boolean): string {
   return "#eec98c";
 }
 
+function hardwareColor(code: string): string {
+  const upper = code.toUpperCase();
+  if (upper.includes("CAM_LOCK")) {
+    return "#2f6e93";
+  }
+  if (upper.includes("HINGE")) {
+    return "#7f4f24";
+  }
+  if (upper.includes("SLIDE") || upper.includes("TRACK")) {
+    return "#495057";
+  }
+  if (upper.includes("SCREW")) {
+    return "#6c757d";
+  }
+  return "#52796f";
+}
+
+function hardwareKind(code: string): HardwareMarker["kind"] {
+  const upper = code.toUpperCase();
+  if (upper.includes("SCREW") || upper.includes("BOLT")) {
+    return "screw";
+  }
+  if (upper.includes("CAM_LOCK") || upper.includes("CAMLOCK")) {
+    return "cam_lock";
+  }
+  if (upper.includes("SLIDE") || upper.includes("TRACK") || upper.includes("RAIL")) {
+    return "slide";
+  }
+  if (upper.includes("HINGE")) {
+    return "hinge";
+  }
+  return "generic";
+}
+
+function hardwareSize(kind: HardwareMarker["kind"]): number {
+  if (kind === "screw") {
+    return 0.012;
+  }
+  if (kind === "slide") {
+    return 0.016;
+  }
+  if (kind === "hinge") {
+    return 0.015;
+  }
+  return 0.014;
+}
+
+function buildHardwareMarkers(model: ProjectModel, panels: PanelMeshModel[]): HardwareMarker[] {
+  if (!model.hardware || model.hardware.length === 0) {
+    return [];
+  }
+
+  const panelById = new Map(panels.map((panel) => [panel.id, panel]));
+  const componentById = new Map(model.components.map((component) => [component.id, component]));
+
+  const markers: HardwareMarker[] = [];
+  for (const line of model.hardware) {
+    const qty = Math.max(0, Math.min(line.qty || 0, MAX_RENDER_HARDWARE));
+    if (qty === 0) {
+      continue;
+    }
+
+    const code = line.code || "HARDWARE";
+    const mountTargets = line.mount_targets || [];
+    if (mountTargets.length === 0) {
+      continue;
+    }
+
+    const color = hardwareColor(code);
+    const kind = hardwareKind(code);
+    const size = hardwareSize(kind);
+
+    const targetCount = Math.min(qty, mountTargets.length);
+    for (let i = 0; i < targetCount; i += 1) {
+      const target = mountTargets[i];
+      const targetComponent = componentById.get(target.component_id);
+      if (isStructuralComponent(targetComponent)) {
+        continue;
+      }
+      const panel = panelById.get(target.component_id);
+      if (!panel) {
+        continue;
+      }
+
+      const normalOffset = (target.normal_offset_mm ?? 2.0) * SCALE_TO_METERS;
+      let normal: [number, number, number] = [0, 0, 1];
+      if (target.face === "+x") {
+        normal = [1, 0, 0];
+      } else if (target.face === "-x") {
+        normal = [-1, 0, 0];
+      } else if (target.face === "+y") {
+        normal = [0, 1, 0];
+      } else if (target.face === "-y") {
+        normal = [0, -1, 0];
+      } else if (target.face === "+z") {
+        normal = [0, 0, 1];
+      } else if (target.face === "-z") {
+        normal = [0, 0, -1];
+      }
+
+      const position: [number, number, number] = [
+        panel.position[0] + (target.local_x * SCALE_TO_METERS) + normal[0] * normalOffset,
+        panel.position[1] + (target.local_y * SCALE_TO_METERS) + normal[1] * normalOffset,
+        panel.position[2] + (target.local_z * SCALE_TO_METERS) + normal[2] * normalOffset,
+      ];
+
+      markers.push({
+        id: `${line.id || code}-${i}`,
+        label: code,
+        position,
+        kind,
+        size,
+        color,
+      });
+    }
+  }
+
+  return markers;
+}
+
 export function ParametricViewer({ model, validation }: ParametricViewerProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string>("");
   const [autoRotate, setAutoRotate] = useState<boolean>(true);
   const [showGrid, setShowGrid] = useState<boolean>(true);
+  const [showHardware, setShowHardware] = useState<boolean>(true);
   const [explode, setExplode] = useState<number>(0);
 
   const panels = useMemo(() => {
@@ -511,6 +659,29 @@ export function ParametricViewer({ model, validation }: ParametricViewerProps): 
   }, [model]);
 
   const selectedPanel = panels.find((panel) => panel.id === selectedId);
+  const hardwareMarkers = useMemo(() => {
+    if (!model) {
+      return [];
+    }
+    return buildHardwareMarkers(model, panels);
+  }, [model, panels]);
+  const hardwareLineCount = useMemo(() => {
+    if (!model) {
+      return 0;
+    }
+    return model.hardware.reduce((acc, line) => acc + Math.max(0, line.qty || 0), 0);
+  }, [model]);
+  const explicitMountSlotCount = useMemo(() => {
+    if (!model) {
+      return 0;
+    }
+    return model.hardware.reduce((acc, line) => {
+      const qty = Math.max(0, Math.min(line.qty || 0, MAX_RENDER_HARDWARE));
+      const targets = line.mount_targets?.length || 0;
+      return acc + Math.min(qty, targets);
+    }, 0);
+  }, [model]);
+  const missingMountSlotCount = Math.max(0, hardwareLineCount - explicitMountSlotCount);
 
   if (!model) {
     return (
@@ -540,6 +711,15 @@ export function ParametricViewer({ model, validation }: ParametricViewerProps): 
             onChange={(event) => setShowGrid(event.currentTarget.checked)}
           />
           Show grid
+        </label>
+        <label className="viewer-toolbar-item" htmlFor="show-hardware-toggle">
+          <input
+            id="show-hardware-toggle"
+            type="checkbox"
+            checked={showHardware}
+            onChange={(event) => setShowHardware(event.currentTarget.checked)}
+          />
+          Show hardware
         </label>
         <label className="viewer-toolbar-item slider" htmlFor="explode-slider">
           Exploded view
@@ -580,6 +760,19 @@ export function ParametricViewer({ model, validation }: ParametricViewerProps): 
             </mesh>
           ))}
 
+          {showHardware
+            ? hardwareMarkers.map((marker) => (
+                <mesh key={marker.id} position={marker.position}>
+                  {marker.kind === "screw" ? <cylinderGeometry args={[marker.size * 0.36, marker.size * 0.36, marker.size * 1.45, 16]} /> : null}
+                  {marker.kind === "cam_lock" ? <sphereGeometry args={[marker.size * 0.52, 18, 18]} /> : null}
+                  {marker.kind === "slide" ? <boxGeometry args={[marker.size * 2.2, marker.size * 0.55, marker.size * 1.05]} /> : null}
+                  {marker.kind === "hinge" ? <torusGeometry args={[marker.size * 0.58, marker.size * 0.2, 12, 24]} /> : null}
+                  {marker.kind === "generic" ? <octahedronGeometry args={[marker.size * 0.62, 0]} /> : null}
+                  <meshStandardMaterial color={marker.color} emissive={marker.color} emissiveIntensity={0.24} />
+                </mesh>
+              ))
+            : null}
+
           {showGrid ? <gridHelper args={[3, 24, "#9fb9cc", "#dce7ef"]} position={[0, -0.65, 0]} /> : null}
           <OrbitControls makeDefault enablePan enableZoom enableRotate autoRotate={autoRotate} autoRotateSpeed={0.9} />
         </Canvas>
@@ -588,6 +781,21 @@ export function ParametricViewer({ model, validation }: ParametricViewerProps): 
       <div className="viewer-meta-row" aria-live="polite">
         <p>
           Components: <strong>{model.components.length}</strong>
+        </p>
+        <p>
+          Hardware lines: <strong>{model.hardware.length}</strong>
+        </p>
+        <p>
+          Hardware qty: <strong>{hardwareLineCount}</strong>
+        </p>
+        <p>
+          Explicit mounts: <strong>{explicitMountSlotCount}</strong>
+        </p>
+        <p>
+          Missing mounts: <strong>{missingMountSlotCount}</strong>
+        </p>
+        <p>
+          Hardware assets: <strong>{showHardware ? hardwareMarkers.length : 0}</strong>
         </p>
         <p>
           Selection: <strong>{selectedPanel?.label || "none"}</strong>
@@ -599,6 +807,16 @@ export function ParametricViewer({ model, validation }: ParametricViewerProps): 
       {!validation?.valid && validation ? (
         <p className="viewer-validation-hint">Validation has failing rules. Run adjustments and validate again to clear highlighted issues.</p>
       ) : null}
+      {showHardware && hardwareLineCount > 0 && hardwareMarkers.length === 0 ? (
+        <p className="viewer-validation-hint">Hardware rendering is strict: add mount_targets (component_id, face, local_x, local_y, local_z) to each hardware line.</p>
+      ) : null}
+      <div className="viewer-hardware-legend" aria-label="Hardware legend">
+        <span className="viewer-hardware-pill viewer-hardware-pill-screw">Screw/Bolt</span>
+        <span className="viewer-hardware-pill viewer-hardware-pill-cam">Cam lock</span>
+        <span className="viewer-hardware-pill viewer-hardware-pill-slide">Slide/Rail</span>
+        <span className="viewer-hardware-pill viewer-hardware-pill-hinge">Hinge</span>
+        <span className="viewer-hardware-pill viewer-hardware-pill-generic">Generic</span>
+      </div>
     </div>
   );
 }

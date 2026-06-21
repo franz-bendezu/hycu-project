@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections import Counter
 from statistics import mean
@@ -7,6 +9,7 @@ from statistics import mean
 from PIL import Image
 
 from app.core.config import (
+    COMPONENT_SUPERVISION_AVAILABLE,
     COMPONENT_ALIAS_EXACT,
     COMPONENT_ALIAS_CONTAINS,
     HARDWARE_PARTS,
@@ -15,6 +18,8 @@ from app.core.config import (
     PRODUCT_TYPE_COMPONENT_HINTS,
     PRODUCT_TYPE_COMPONENT_MINIMUMS,
     PRODUCT_TYPE_CONFIDENCE_MULTIPLIERS,
+    get_escalation_geometry_threshold,
+    get_escalation_mvs_threshold,
 )
 from app.schemas import (
     Component,
@@ -132,6 +137,237 @@ def component_id(name: str) -> str:
     return str(uuid.uuid5(COMPONENT_ID_NAMESPACE, normalized))
 
 
+def normalize_box(
+    box: tuple[float, float, float, float] | list[float] | None,
+    image_w: int | float | None,
+    image_h: int | float | None,
+) -> tuple[float, float, float, float] | None:
+    if not isinstance(box, (tuple, list)) or len(box) != 4:
+        return None
+    x1, y1, x2, y2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    if not isinstance(image_w, (int, float)) or not isinstance(image_h, (int, float)):
+        return (x1, y1, x2, y2)
+    if image_w <= 0 or image_h <= 0:
+        return (x1, y1, x2, y2)
+    # Preserve already-normalized boxes.
+    if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
+        return (x1, y1, x2, y2)
+    return (
+        round(x1 / float(image_w), 5),
+        round(y1 / float(image_h), 5),
+        round(x2 / float(image_w), 5),
+        round(y2 / float(image_h), 5),
+    )
+
+
+def box_center(box: tuple[float, float, float, float] | None) -> tuple[float, float]:
+    if box is None:
+        return (0.5, 0.5)
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
+
+
+def infer_position_label(name: str, box: tuple[float, float, float, float] | None) -> str | None:
+    if box is None:
+        return None
+    cx, cy = box_center(box)
+    if "side_panel" in name:
+        return "left" if cx <= 0.5 else "right"
+    if "top_panel" in name:
+        return "top"
+    if "bottom_panel" in name:
+        return "bottom"
+    if "back_panel" in name:
+        return "back"
+    if "door_panel" in name:
+        return "front"
+    if "shelf_panel" in name:
+        return "interior"
+    if cy <= 0.25:
+        return "top"
+    if cy >= 0.75:
+        return "bottom"
+    return "center"
+
+
+def deterministic_hash_payload(detected_type: ProductType, components: list[Component], joints: list[JointEvidence]) -> str:
+    payload = {
+        "detected_type": detected_type.value,
+        "components": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "quantity": c.quantity,
+                "box": c.box_corners,
+                "position": c.relative_position,
+            }
+            for c in sorted(components, key=lambda item: (item.name, item.id))
+        ],
+        "joints": [
+            {
+                "id": j.id,
+                "parent": j.parent_component_id,
+                "child": j.child_component_id,
+                "joint_type": j.joint_type.value,
+                "count": j.count,
+                "anchor_parent": j.anchor_parent,
+                "anchor_child": j.anchor_child,
+                "orientation": j.orientation_degrees,
+            }
+            for j in sorted(joints, key=lambda item: (item.parent_component_id, item.child_component_id, item.joint_type.value))
+        ],
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def build_constraints_report(components: list[Component], joints: list[JointEvidence]) -> tuple[dict[str, float | int | bool], list[str]]:
+    report: dict[str, float | int | bool] = {
+        "components_total": len(components),
+        "joints_total": len(joints),
+        "orthogonality_error": 0.0,
+        "parallelism_error": 0.0,
+        "penetration_violations": 0,
+        "support_violations": 0,
+        "floating_components": 0,
+    }
+    flags: list[str] = []
+
+    structural = [c for c in components if c.kind in {ComponentKind.PANEL, ComponentKind.SUPPORT, ComponentKind.ASSEMBLY}]
+    connected_ids = {j.parent_component_id for j in joints} | {j.child_component_id for j in joints}
+    floating = [c for c in structural if c.id not in connected_ids and c.quantity > 0]
+    if floating:
+        report["floating_components"] = len(floating)
+        report["support_violations"] = len(floating)
+        flags.append("floating_component_detected")
+
+    uncertain_components = [c for c in components if c.uncertainty > 0.45]
+    if uncertain_components:
+        flags.append("low_confidence_components")
+
+    uncertain_joints = [j for j in joints if j.confidence < 0.45]
+    if uncertain_joints:
+        flags.append("low_confidence_joints")
+
+    if not joints:
+        flags.append("no_joint_evidence")
+
+    report["requires_review"] = bool(flags)
+    return report, sorted(set(flags))
+
+
+def expected_joint_count_for_type(detected_type: ProductType) -> int:
+    minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
+    side_qty = int(minimums.get("side_panel", 0))
+    top_qty = int(minimums.get("top_panel", 0))
+    bottom_qty = int(minimums.get("bottom_panel", 0))
+    shelf_qty = int(minimums.get("shelf_panel", 0))
+    door_qty = int(minimums.get("door_panel", 0))
+    drawer_qty = int(minimums.get("drawer_box", 0))
+
+    estimate = 0
+    if side_qty >= 2 and top_qty > 0:
+        estimate += 1
+    if side_qty >= 2 and bottom_qty > 0:
+        estimate += 1
+    if side_qty >= 2 and shelf_qty > 0:
+        estimate += 1
+    if door_qty > 0:
+        estimate += 1
+    if drawer_qty > 0:
+        estimate += 1
+    if int(minimums.get("back_panel", 0)) > 0:
+        estimate += 1
+    return max(1, estimate)
+
+
+def compute_validation_metrics(
+    detected_type: ProductType,
+    components: list[Component],
+    joints: list[JointEvidence],
+    confidence: float,
+    constraints_report: dict[str, float | int | bool],
+) -> dict[str, float | int | bool]:
+    minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
+    required_names = sorted(minimums)
+    observed_names = {component.name for component in components}
+
+    matched_required = sum(1 for name in required_names if name in observed_names)
+    required_total = max(1, len(required_names))
+    component_coverage = matched_required / required_total
+
+    count_error = 0.0
+    for name, expected_qty in minimums.items():
+        observed_qty = sum(component.quantity for component in components if component.name == name)
+        count_error += abs(float(observed_qty) - float(expected_qty))
+    normalized_count_error = count_error / max(1.0, float(sum(minimums.values()) or 1))
+
+    expected_joint_count = expected_joint_count_for_type(detected_type)
+    observed_joint_count = len(joints)
+    joint_count_error = abs(observed_joint_count - expected_joint_count) / max(1.0, float(expected_joint_count))
+
+    missing_types = len([name for name in required_names if name not in observed_names])
+    extra_types = len([name for name in observed_names if name not in set(required_names)])
+    graph_edit_distance_proxy = missing_types + extra_types + abs(observed_joint_count - expected_joint_count)
+
+    floating_components = int(constraints_report.get("floating_components", 0))
+    physical_validity_score = max(0.0, 1.0 - min(1.0, 0.25 * floating_components + 0.25 * joint_count_error))
+
+    return {
+        "component_coverage": round(component_coverage, 4),
+        "component_count_error": round(normalized_count_error, 4),
+        "joint_count_error": round(joint_count_error, 4),
+        "graph_edit_distance_proxy": int(graph_edit_distance_proxy),
+        "physical_validity_score": round(physical_validity_score, 4),
+        "confidence_score": round(float(confidence), 4),
+    }
+
+
+def build_escalation_decision(
+    review_flags: list[str],
+    validation_metrics: dict[str, float | int | bool],
+    constraints_report: dict[str, float | int | bool],
+) -> dict[str, str | float | bool | list[str]]:
+    component_coverage = float(validation_metrics.get("component_coverage", 0.0))
+    physical_validity = float(validation_metrics.get("physical_validity_score", 0.0))
+    confidence_score = float(validation_metrics.get("confidence_score", 0.0))
+    graph_proxy = float(validation_metrics.get("graph_edit_distance_proxy", 0.0))
+    requires_review = bool(constraints_report.get("requires_review", False))
+
+    score = 0.0
+    if requires_review:
+        score += 0.45
+    if component_coverage < 0.7:
+        score += 0.25
+    if physical_validity < 0.6:
+        score += 0.2
+    if confidence_score < 0.45:
+        score += 0.1
+    if graph_proxy >= 4:
+        score += 0.2
+
+    geometry_threshold = get_escalation_geometry_threshold()
+    mvs_threshold = max(geometry_threshold, get_escalation_mvs_threshold())
+
+    strategy = "fast_2d_fusion"
+    human_review = False
+    if score >= mvs_threshold:
+        strategy = "escalate_mvs_refinement"
+        human_review = True
+    elif score >= geometry_threshold:
+        strategy = "escalate_geometry_optimization"
+        human_review = True
+
+    return {
+        "escalation_score": round(min(1.0, score), 4),
+        "strategy": strategy,
+        "human_review_required": human_review,
+        "geometry_threshold": round(geometry_threshold, 4),
+        "mvs_threshold": round(mvs_threshold, 4),
+        "reasons": review_flags,
+    }
+
+
 def joint_id(parent_component_id: str, child_component_id: str, joint_type: JointType) -> str:
     return f"joint_{parent_component_id}_{child_component_id}_{joint_type.value}"
 
@@ -157,7 +393,55 @@ def component_kind(label: str) -> ComponentKind:
     return ComponentKind.ASSEMBLY
 
 
-def geometry_relabel_component_name(name: str, det: dict) -> str:
+PRODUCT_CLASS_COMPONENT_NAMES = {
+    "cabinet_body",
+    "bookcase_body",
+    "desk_frame",
+    "table_top",
+    "nightstand_body",
+    "dresser_body",
+    "sideboard_body",
+    "tv_stand_body",
+}
+
+
+FALLBACK_PRODUCT_COMPONENT_BY_TYPE: dict[ProductType, str] = {
+    ProductType.CABINET: "cabinet_body",
+    ProductType.WARDROBE: "cabinet_body",
+    ProductType.BOOKCASE: "bookcase_body",
+    ProductType.DESK: "desk_frame",
+    ProductType.TABLE: "top_panel",
+    ProductType.SHELF: "shelf_panel",
+    ProductType.NIGHTSTAND: "nightstand_body",
+    ProductType.DRESSER: "dresser_body",
+    ProductType.SIDEBOARD: "sideboard_body",
+    ProductType.TV_STAND: "tv_stand_body",
+}
+
+
+def _has_informative_mask(det: dict) -> bool:
+    box = det.get("box")
+    image_w = det.get("image_width_px")
+    image_h = det.get("image_height_px")
+    mask_fill_ratio = det.get("mask_fill_ratio")
+
+    if not isinstance(box, (tuple, list)) or len(box) != 4:
+        return False
+    if not isinstance(image_w, (int, float)) or not isinstance(image_h, (int, float)):
+        return False
+    if image_w <= 1 or image_h <= 1:
+        return False
+    if not isinstance(mask_fill_ratio, (int, float)):
+        return False
+
+    x1, y1, x2, y2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    bbox_fill_ratio = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1)) / max(float(image_w) * float(image_h), 1.0)
+    # A significantly smaller filled area than the raw bbox hints we got a real mask,
+    # not a rectangular rasterized fallback.
+    return float(mask_fill_ratio) < (bbox_fill_ratio * 0.9)
+
+
+def geometry_relabel_component_name(name: str, det: dict, *, allow_product_relabel: bool) -> str:
     box = det.get("box")
     if not isinstance(box, (tuple, list)) or len(box) != 4:
         return name
@@ -179,6 +463,9 @@ def geometry_relabel_component_name(name: str, det: dict) -> str:
     vertical_aspect = bh / bw
     area_ratio = float(det.get("mask_fill_ratio", width_ratio * height_ratio))
     score = float(det.get("score", 0.0))
+
+    if name in PRODUCT_CLASS_COMPONENT_NAMES and not allow_product_relabel:
+        return name
 
     panel_family = {
         "side_panel",
@@ -267,26 +554,72 @@ def components_from_detections(
     detected_type: ProductType,
 ) -> list[Component]:
     # 1. Filter and normalize detections
-    valid_detections = []
+    candidates: list[dict] = []
     for det in detections:
         class_id = det["class_id"]
         score = det["score"]
         if class_id < 0 or class_id >= len(labels) or score < threshold:
             continue
-        
+ 
         label = labels[class_id]
-        name = canonical_component_name(label)
-        name = geometry_relabel_component_name(name, det)
-        kind = component_kind(name)
+        base_name = canonical_component_name(label)
         box = det["box"] # [x1, y1, x2, y2]
         track_id = det.get("track_id")
-        
+        view_index = det.get("view_index")
+        normalized_box = normalize_box(
+            box,
+            det.get("image_width_px"),
+            det.get("image_height_px"),
+        )
+
+        candidates.append({
+            "base_name": base_name,
+            "is_product_label": product_type_from_label(label) is not None,
+            "det": det,
+            "box": box,
+            "normalized_box": normalized_box,
+            "score": score,
+            "track_id": track_id,
+            "view_index": view_index,
+        })
+
+    has_component_signal = any(not item["is_product_label"] for item in candidates)
+
+    # If the dataset currently has only product-level supervision, avoid
+    # geometry relabel from product classes and rely on type priors.
+    if not has_component_signal and not COMPONENT_SUPERVISION_AVAILABLE:
+        product_name = FALLBACK_PRODUCT_COMPONENT_BY_TYPE.get(detected_type)
+        anchored: list[Component] = []
+        if product_name:
+            anchored.append(
+                Component(
+                    id=component_id(product_name),
+                    name=product_name,
+                    kind=component_kind(product_name),
+                    quantity=1,
+                )
+            )
+        return merge_component_sets(anchored, minimum_components_for_type(detected_type))
+
+    valid_detections = []
+    for item in candidates:
+        base_name = str(item["base_name"])
+        det = item["det"]
+        allow_product_relabel = has_component_signal or _has_informative_mask(det)
+        name = geometry_relabel_component_name(
+            base_name,
+            det,
+            allow_product_relabel=allow_product_relabel,
+        )
+        kind = component_kind(name)
+
         valid_detections.append({
             "name": name,
             "kind": kind,
-            "box": box,
-            "score": score,
-            "track_id": track_id,
+            "box": item["normalized_box"] or normalize_box(item["box"], None, None),
+            "score": item["score"],
+            "track_id": item["track_id"],
+            "view_index": item["view_index"],
         })
 
     if not valid_detections:
@@ -327,19 +660,34 @@ def components_from_detections(
     for det in stabilized:
         name = det["name"]
         current = by_name.get(name)
+        view_index = det.get("view_index")
         if current is None:
             by_name[name] = {
                 "kind": det["kind"],
-                "quantity": 1,
+                "quantity": 0,
                 "box": det["box"],
                 "best_score": det["score"],
+                "score_sum": float(det["score"]),
+                "score_count": 1,
+                "track_ids": set([det["track_id"]]) if isinstance(det.get("track_id"), int) else set(),
+                "view_ids": set([int(view_index)]) if isinstance(view_index, int) else set(),
             }
         else:
-            current["quantity"] += 1
+            current["score_sum"] += float(det["score"])
+            current["score_count"] += 1
+            if isinstance(det.get("track_id"), int):
+                current["track_ids"].add(int(det["track_id"]))
+            if isinstance(view_index, int):
+                current["view_ids"].add(int(view_index))
 
             if det["score"] > current["best_score"]:
                 current["best_score"] = det["score"]
                 current["box"] = det["box"]
+
+    for entry in by_name.values():
+        track_count = len(entry["track_ids"])
+        detection_count = int(entry["score_count"])
+        entry["quantity"] = max(1, track_count if track_count > 0 else detection_count)
 
     components = [
         Component(
@@ -348,6 +696,24 @@ def components_from_detections(
             kind=entry["kind"],
             quantity=entry["quantity"],
             box_corners=entry["box"],
+            position_label=infer_position_label(name, entry["box"]),
+            relative_position=(
+                round(box_center(entry["box"])[0] - 0.5, 4),
+                round(0.5 - box_center(entry["box"])[1], 4),
+                0.0,
+            ) if entry["box"] is not None else None,
+            bbox_3d=(
+                round(box_center(entry["box"])[0] - 0.5, 4),
+                round(0.5 - box_center(entry["box"])[1], 4),
+                0.0,
+                round(max(0.0, float(entry["box"][2]) - float(entry["box"][0])), 4),
+                round(max(0.0, float(entry["box"][3]) - float(entry["box"][1])), 4),
+                0.03,
+            ) if entry["box"] is not None else None,
+            orientation_euler_deg=(0.0, 0.0, 0.0),
+            visible_in_views=sorted(entry["view_ids"]),
+            confidence=round(min(1.0, entry["score_sum"] / max(entry["score_count"], 1)), 4),
+            uncertainty=round(1.0 - min(1.0, entry["score_sum"] / max(entry["score_count"], 1)), 4),
         )
         for name, entry in sorted(by_name.items())
     ]
@@ -440,6 +806,30 @@ def build_joints(
     def add_joint(parent_name: str, child_name: str, joint_type: JointType, count: int) -> None:
         parent_id = comp_id(parent_name)
         child_id = comp_id(child_name)
+
+        parent_component = by_name.get(parent_name)
+        child_component = by_name.get(child_name)
+        parent_anchor = parent_component.relative_position if parent_component is not None else (0.0, 0.0, 0.0)
+        child_anchor = child_component.relative_position if child_component is not None else (0.0, 0.0, 0.0)
+
+        axis = (0.0, 0.0, 1.0)
+        degrees = 90.0
+        if joint_type in {JointType.SLIDING_TRACK, JointType.TELESCOPIC_SLIDE}:
+            axis = (1.0, 0.0, 0.0)
+            degrees = 0.0
+        elif joint_type == JointType.SCREW:
+            axis = (0.0, 1.0, 0.0)
+            degrees = 90.0
+
+        parent_conf = parent_component.confidence if parent_component is not None else 0.5
+        child_conf = child_component.confidence if child_component is not None else 0.5
+        joint_conf = round(min(1.0, 0.5 * (parent_conf + child_conf)), 4)
+
+        view_ids = sorted(
+            set(parent_component.visible_in_views if parent_component is not None else [])
+            | set(child_component.visible_in_views if child_component is not None else [])
+        )
+
         joints.append(
             JointEvidence(
                 id=joint_id(parent_id, child_id, joint_type),
@@ -447,6 +837,13 @@ def build_joints(
                 child_component_id=child_id,
                 joint_type=joint_type,
                 count=max(1, count),
+                anchor_parent=parent_anchor,
+                anchor_child=child_anchor,
+                orientation_axis=axis,
+                orientation_degrees=degrees,
+                fit_score=joint_conf,
+                confidence=joint_conf,
+                evidence_view_ids=view_ids,
             )
         )
 
@@ -566,6 +963,15 @@ def estimate_dimensions_multi(evidence: list[ImageEvidence]) -> tuple[float, flo
     )
 
 
+def has_desk_component_signal(component_counts: Counter[str]) -> bool:
+    strong_names = {"top_panel", "desktop", "desk_frame", "front_apron"}
+    strong = any(component_counts.get(name, 0) > 0 for name in strong_names)
+    # At least one side support or two legs indicates desk-like base support.
+    side_support = component_counts.get("side_panel", 0) > 0
+    leg_support = component_counts.get("leg", 0) >= 2
+    return strong and (side_support or leg_support)
+
+
 def assemble_project(
     evidence: list[ImageEvidence], labels: tuple[str, ...], threshold: float
 ) -> InferResponse:
@@ -580,24 +986,34 @@ def assemble_project(
 
     # Determine project-wide product type using multiple evidence sources.
     scores_by_type: dict[ProductType, float] = {}
-    for item in evidence:
-        scores_by_type[item.detected_type] = scores_by_type.get(item.detected_type, 0.0) + item.confidence
-
     component_counts: Counter[str] = Counter()
-    for det in all_detections:
-        class_id = det.get("class_id", -1)
-        score = float(det.get("score", 0.0))
-        if not isinstance(class_id, int) or class_id < 0 or class_id >= len(labels):
-            continue
 
-        label = labels[class_id]
-        label_type = product_type_from_label(label)
-        if label_type is not None:
-            # Keep class-head logits useful but secondary to image-level votes.
-            scores_by_type[label_type] = scores_by_type.get(label_type, 0.0) + (score * 0.5)
-            continue
+    for item in evidence:
+        image_component_signal = 0
 
-        component_counts[canonical_component_name(label)] += 1
+        for det in item.raw_detections:
+            class_id = det.get("class_id", -1)
+            score = float(det.get("score", 0.0))
+            if not isinstance(class_id, int) or class_id < 0 or class_id >= len(labels):
+                continue
+
+            label = labels[class_id]
+            label_type = product_type_from_label(label)
+            if label_type is not None:
+                scores_by_type[label_type] = scores_by_type.get(label_type, 0.0) + (score * 0.5)
+                continue
+
+            # Keep low-score noise from dominating component-driven type inference.
+            if score < max(0.05, threshold * 0.65):
+                continue
+
+            image_component_signal += 1
+            component_counts[canonical_component_name(label)] += 1
+
+        image_weight = 1.0 + min(0.35, image_component_signal * 0.04)
+        scores_by_type[item.detected_type] = scores_by_type.get(item.detected_type, 0.0) + (
+            item.confidence * image_weight
+        )
 
     inferred_component_type = infer_type_from_components(component_counts)
     if inferred_component_type is not None:
@@ -605,14 +1021,27 @@ def assemble_project(
         boost = min(1.2, 0.4 + (0.1 * support))
         scores_by_type[inferred_component_type] = scores_by_type.get(inferred_component_type, 0.0) + boost
 
+    # Add a light geometry prior to counter product-type bias when detections are ambiguous.
+    avg_aspect = mean(item.width_px / max(item.height_px, 1) for item in evidence)
+    if avg_aspect >= 1.35:
+        scores_by_type[ProductType.DESK] = scores_by_type.get(ProductType.DESK, 0.0) + 0.35
+        scores_by_type[ProductType.TABLE] = scores_by_type.get(ProductType.TABLE, 0.0) + 0.15
+    elif avg_aspect >= 1.10:
+        scores_by_type[ProductType.DESK] = scores_by_type.get(ProductType.DESK, 0.0) + 0.20
+    elif avg_aspect <= 0.55:
+        scores_by_type[ProductType.BOOKCASE] = scores_by_type.get(ProductType.BOOKCASE, 0.0) + 0.35
+        scores_by_type[ProductType.SHELF] = scores_by_type.get(ProductType.SHELF, 0.0) + 0.20
+    elif avg_aspect <= 0.80:
+        scores_by_type[ProductType.SHELF] = scores_by_type.get(ProductType.SHELF, 0.0) + 0.20
+
     detected_type = ProductType(max(scores_by_type, key=scores_by_type.get))
     confidence = min(1.0, scores_by_type[detected_type] / len(evidence))
     effective_threshold = threshold * PRODUCT_TYPE_CONFIDENCE_MULTIPLIERS.get(detected_type.value, 1.0)
     if confidence < effective_threshold:
-        avg_aspect = mean(item.width_px / max(item.height_px, 1) for item in evidence)
+        desk_signal = has_desk_component_signal(component_counts) or inferred_component_type == ProductType.DESK
         if avg_aspect >= 1.45:
             detected_type = ProductType.TABLE
-        elif avg_aspect >= 1.15:
+        elif avg_aspect >= 1.15 and desk_signal:
             detected_type = ProductType.DESK
         elif avg_aspect <= 0.45:
             detected_type = ProductType.BOOKCASE
@@ -622,20 +1051,50 @@ def assemble_project(
             detected_type = ProductType.CABINET
     
     # Assembly Logic (The "Model")
-    components = components_from_detections(all_detections, labels, threshold, detected_type)
+    component_threshold = max(
+        0.05,
+        threshold * PRODUCT_TYPE_CONFIDENCE_MULTIPLIERS.get(detected_type.value, 1.0),
+    )
+    components = components_from_detections(all_detections, labels, component_threshold, detected_type)
     structural_components, hardware_components = split_components(components)
     
     vis, cov, unknown_int = interior_visibility(structural_components, hardware_components)
     door_type, _ = door_metadata(structural_components, hardware_components, vis)
-    uncertain_hw = has_uncertain_hardware(all_detections, labels, threshold)
+    uncertain_hw = has_uncertain_hardware(all_detections, labels, component_threshold)
     
     joints = build_joints(structural_components, hardware_components, door_type)
     hardware = build_hardware(joints, uncertain_hw)
     
     width, height, depth = estimate_dimensions_multi(evidence)
+
+    # Fill coarse real-world dimensions for deterministic downstream layout.
+    for component in components:
+        if component.box_corners is None:
+            continue
+        x1, y1, x2, y2 = component.box_corners
+        span_x = max(0.01, x2 - x1)
+        span_y = max(0.01, y2 - y1)
+        component.dimensions_mm = (
+            round(span_x * width, 2),
+            round(span_y * height, 2),
+            18.0,
+        )
+
     index = component_index(components)
+    constraints_report, review_flags = build_constraints_report(components, joints)
+    validation_metrics = compute_validation_metrics(
+        detected_type,
+        components,
+        joints,
+        confidence,
+        constraints_report,
+    )
+    escalation = build_escalation_decision(review_flags, validation_metrics, constraints_report)
+    deterministic_hash = deterministic_hash_payload(detected_type, components, joints)
 
     return InferResponse(
+        schema_version="1.1.0",
+        coordinate_frame="furniture_local_v1",
         detected_type=detected_type,
         confidence=round(float(confidence), 3),
         suggested_width=width,
@@ -656,4 +1115,9 @@ def assemble_project(
         images_analyzed=len(evidence),
         image_results=evidence,
         evidence=evidence,
+        deterministic_hash=deterministic_hash,
+        constraints_report=constraints_report,
+        review_flags=review_flags,
+        validation_metrics=validation_metrics,
+        escalation=escalation,
     )

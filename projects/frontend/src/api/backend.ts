@@ -52,8 +52,15 @@ export enum InferenceHardwareCode {
 
 export enum ProductInferredType {
   CABINET = "cabinet",
+  WARDROBE = "wardrobe",
+  BOOKCASE = "bookcase",
   DESK = "desk",
+  TABLE = "table",
   SHELF = "shelf",
+  NIGHTSTAND = "nightstand",
+  DRESSER = "dresser",
+  SIDEBOARD = "sideboard",
+  TV_STAND = "tv_stand",
 }
 
 export enum ProjectComponentKind {
@@ -63,6 +70,7 @@ export enum ProjectComponentKind {
   BOTTOM_PANEL = "bottom_panel",
   BACK_PANEL = "back_panel",
   SHELF = "shelf",
+  DIVIDER_PANEL = "divider_panel",
   FRONT_PANEL = "front_panel",
   DOOR_PANEL = "door_panel",
   DRAWER_FRONT = "drawer_front",
@@ -70,6 +78,13 @@ export enum ProjectComponentKind {
   RIGHT_LEG_FRONT = "right_leg_front",
   LEFT_LEG_BACK = "left_leg_back",
   RIGHT_LEG_BACK = "right_leg_back",
+}
+
+export enum ProjectComponentCategory {
+  STRUCTURAL = "structural",
+  FRONT = "front",
+  INTERNAL = "internal",
+  SUPPORT = "support",
 }
 
 export enum ProjectJointRule {
@@ -198,6 +213,7 @@ export type ProjectModel = {
   components: Array<{
     id: string;
     kind: ProjectComponentKind;
+    category?: ProjectComponentCategory;
     material_id?: string | null;
     width: number;
     height: number;
@@ -207,9 +223,18 @@ export type ProjectModel = {
     id?: string | null;
     code: string;
     qty: number;
+    anchor?: string | null;
     mesh_path?: string | null;
     svg_path?: string | null;
     joint_type?: string | null;
+    mount_targets?: Array<{
+      component_id: string;
+      face: "+x" | "-x" | "+y" | "-y" | "+z" | "-z";
+      local_x: number;
+      local_y: number;
+      local_z: number;
+      normal_offset_mm?: number;
+    }>;
   }>;
   joints?: Array<{
     parent_id: string;

@@ -4,6 +4,7 @@ import uuid
 
 from app.domain import ComponentSpec, HardwareSpec, ProductSpec, ProjectDesign
 from app.presentation.schemas.project_design import (
+    ComponentCategory,
     ComponentKind,
     FeatureSpec,
     HardwareAnchor,
@@ -33,6 +34,7 @@ class ModelGenerator:
         components = self._build_components(spec)
         for component in components:
             component.material_id = default_material.id
+            component.category = self._category_for_kind(component.kind)
 
         joints = self._build_joints(spec, components)
         features = self._build_features(joints)
@@ -61,6 +63,7 @@ class ModelGenerator:
         components = self._build_components(spec)
         for component in components:
             component.material_id = model.materials[0].id if model.materials else "material_board_default"
+            component.category = self._category_for_kind(component.kind)
 
         joints = self._build_joints(spec, components)
         features = self._build_features(joints)
@@ -97,6 +100,22 @@ class ModelGenerator:
 
         for feature in features:
             feature.component_id = id_map.get(feature.component_id, feature.component_id)
+
+    def _category_for_kind(self, kind: ComponentKind) -> ComponentCategory:
+        if kind in {
+            ComponentKind.LEFT_SIDE,
+            ComponentKind.RIGHT_SIDE,
+            ComponentKind.TOP_PANEL,
+            ComponentKind.BOTTOM_PANEL,
+            ComponentKind.BACK_PANEL,
+            ComponentKind.DIVIDER_PANEL,
+        }:
+            return ComponentCategory.STRUCTURAL
+        if kind in {ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT, ComponentKind.FRONT_PANEL}:
+            return ComponentCategory.FRONT
+        if kind == ComponentKind.SHELF:
+            return ComponentCategory.INTERNAL
+        return ComponentCategory.SUPPORT
 
     def _build_components(self, spec: ProductSpec) -> list[ComponentSpec]:
         profile = self._profile_for_spec(spec)

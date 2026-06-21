@@ -31,6 +31,13 @@ class ComponentKind(str, Enum):
     RIGHT_LEG_BACK = "right_leg_back"
 
 
+class ComponentCategory(str, Enum):
+    STRUCTURAL = "structural"
+    FRONT = "front"
+    INTERNAL = "internal"
+    SUPPORT = "support"
+
+
 class HardwareAnchor(str, Enum):
     # Screws & Fasteners
     WOOD_SCREW_4X40 = "WOOD_SCREW_4X40"
@@ -45,11 +52,40 @@ class HardwareAnchor(str, Enum):
     SHELF_PIN_5MM = "SHELF_PIN_5MM"
 
 
+class HardwareMountFace(str, Enum):
+    POS_X = "+x"
+    NEG_X = "-x"
+    POS_Y = "+y"
+    NEG_Y = "-y"
+    POS_Z = "+z"
+    NEG_Z = "-z"
+
+
+class HardwareMountTarget(BaseModel):
+    component_id: str
+    face: HardwareMountFace
+    local_x: float = 0.0
+    local_y: float = 0.0
+    local_z: float = 0.0
+    normal_offset_mm: float = 2.0
+
+
 class ProductSpec(BaseModel):
     id: str | None = None
     sku: str | None = None
     name: str = Field(..., min_length=1, max_length=120)
-    inferred_type: Literal["cabinet", "desk", "shelf"] = "cabinet"
+    inferred_type: Literal[
+        "cabinet",
+        "wardrobe",
+        "bookcase",
+        "desk",
+        "table",
+        "shelf",
+        "nightstand",
+        "dresser",
+        "sideboard",
+        "tv_stand",
+    ] = "cabinet"
     target_width: float = Field(default=800, gt=0)
     target_height: float = Field(default=1200, gt=0)
     target_depth: float = Field(default=450, gt=0)
@@ -63,6 +99,7 @@ class ProductSpec(BaseModel):
 class Component(BaseModel):
     id: str
     kind: ComponentKind
+    category: ComponentCategory = ComponentCategory.STRUCTURAL
     material_id: str | None = None
     width: float
     height: float
@@ -76,6 +113,7 @@ class HardwareItem(BaseModel):
     anchor: HardwareAnchor | None = None
     mesh_path: str | None = None
     svg_path: str | None = None
+    mount_targets: list[HardwareMountTarget] = Field(default_factory=list)
 
 
 class MaterialSpec(BaseModel):
