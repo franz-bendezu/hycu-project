@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from collections.abc import Callable
 
 import numpy as np
 import onnxruntime as ort  # type: ignore[import-not-found]
@@ -16,7 +17,13 @@ from app.models import ImageEvidence, InferResponse, ProductType, RawDetection
 logger = logging.getLogger(__name__)
 
 class YoloDetector:
-    def __init__(self, model_path: Path, labels: tuple[str, ...], score_threshold: float) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        labels: tuple[str, ...],
+        score_threshold: float,
+        assemble_project: Callable[[list[ImageEvidence], tuple[str, ...], float], InferResponse],
+    ) -> None:
         if not model_path.exists():
             raise RuntimeError(f"YOLO model not found at {model_path}")
 
@@ -40,6 +47,7 @@ class YoloDetector:
         self.model_path = model_path
         self.score_threshold = score_threshold
         self.active_providers = self._session.get_providers()
+        self._assemble_project = assemble_project
 
     @staticmethod
     def _normalize_label(label: str) -> str:
@@ -84,8 +92,6 @@ class YoloDetector:
         return fallback_size, fallback_size
 
     def analyze(self, image_data: list[tuple[Image.Image, str]]) -> InferResponse:
-        from app.services.processor import assemble_project
-        
         evidence_list: list[ImageEvidence] = []
         for image, url in image_data:
             orig_w, orig_h = image.size
@@ -143,7 +149,7 @@ class YoloDetector:
                 )
             )
 
-        return assemble_project(evidence_list, self.labels, self.score_threshold)
+        return self._assemble_project(evidence_list, self.labels, self.score_threshold)
 
     def _extract_detections(self, output: np.ndarray, num_labels: int) -> list[RawDetection]:
         tensor = np.array(output)

@@ -44,10 +44,13 @@ app = FastAPI(title="Vision Inference Service", version="0.1.0", lifespan=lifesp
 
 @lru_cache(maxsize=1)
 def _detector() -> YoloDetector:
+    from app.services.processor import assemble_project
+
     return YoloDetector(
         model_path=get_detector_model_path(),
         labels=get_detector_labels(),
         score_threshold=get_confidence_threshold(),
+        assemble_project=assemble_project,
     )
 
 

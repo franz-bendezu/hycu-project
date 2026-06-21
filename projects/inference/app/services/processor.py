@@ -331,116 +331,119 @@ def build_constraints_report(components: list[Component], joints: list[JointEvid
     return report, sorted(set(flags))
 
 
-def expected_joint_count_for_type(detected_type: ProductType) -> int:
-    minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
-    side_qty = int(minimums.get("side_panel", 0))
-    top_qty = int(minimums.get("top_panel", 0))
-    bottom_qty = int(minimums.get("bottom_panel", 0))
-    shelf_qty = int(minimums.get("shelf_panel", 0))
-    door_qty = int(minimums.get("door_panel", 0))
-    drawer_qty = int(minimums.get("drawer_box", 0))
+class ValidationMetricsCalculator:
+    @staticmethod
+    def expected_joint_count_for_type(detected_type: ProductType) -> int:
+        minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
+        side_qty = int(minimums.get("side_panel", 0))
+        top_qty = int(minimums.get("top_panel", 0))
+        bottom_qty = int(minimums.get("bottom_panel", 0))
+        shelf_qty = int(minimums.get("shelf_panel", 0))
+        door_qty = int(minimums.get("door_panel", 0))
+        drawer_qty = int(minimums.get("drawer_box", 0))
 
-    estimate = 0
-    if side_qty >= 2 and top_qty > 0:
-        estimate += 1
-    if side_qty >= 2 and bottom_qty > 0:
-        estimate += 1
-    if side_qty >= 2 and shelf_qty > 0:
-        estimate += 1
-    if door_qty > 0:
-        estimate += 1
-    if drawer_qty > 0:
-        estimate += 1
-    if int(minimums.get("back_panel", 0)) > 0:
-        estimate += 1
-    return max(1, estimate)
+        estimate = 0
+        if side_qty >= 2 and top_qty > 0:
+            estimate += 1
+        if side_qty >= 2 and bottom_qty > 0:
+            estimate += 1
+        if side_qty >= 2 and shelf_qty > 0:
+            estimate += 1
+        if door_qty > 0:
+            estimate += 1
+        if drawer_qty > 0:
+            estimate += 1
+        if int(minimums.get("back_panel", 0)) > 0:
+            estimate += 1
+        return max(1, estimate)
 
+    @classmethod
+    def compute_validation_metrics(
+        cls,
+        detected_type: ProductType,
+        components: list[Component],
+        joints: list[JointEvidence],
+        confidence: float,
+        constraints_report: dict[str, float | int | bool],
+    ) -> dict[str, float | int | bool]:
+        minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
+        required_names = sorted(minimums)
+        observed_names = {component.name for component in components}
 
-def compute_validation_metrics(
-    detected_type: ProductType,
-    components: list[Component],
-    joints: list[JointEvidence],
-    confidence: float,
-    constraints_report: dict[str, float | int | bool],
-) -> dict[str, float | int | bool]:
-    minimums = PRODUCT_TYPE_COMPONENT_MINIMUMS.get(detected_type.value, {})
-    required_names = sorted(minimums)
-    observed_names = {component.name for component in components}
+        matched_required = sum(1 for name in required_names if name in observed_names)
+        required_total = max(1, len(required_names))
+        component_coverage = matched_required / required_total
 
-    matched_required = sum(1 for name in required_names if name in observed_names)
-    required_total = max(1, len(required_names))
-    component_coverage = matched_required / required_total
+        count_error = 0.0
+        for name, expected_qty in minimums.items():
+            observed_qty = sum(component.quantity for component in components if component.name == name)
+            count_error += abs(float(observed_qty) - float(expected_qty))
+        normalized_count_error = count_error / max(1.0, float(sum(minimums.values()) or 1))
 
-    count_error = 0.0
-    for name, expected_qty in minimums.items():
-        observed_qty = sum(component.quantity for component in components if component.name == name)
-        count_error += abs(float(observed_qty) - float(expected_qty))
-    normalized_count_error = count_error / max(1.0, float(sum(minimums.values()) or 1))
+        expected_joint_count = cls.expected_joint_count_for_type(detected_type)
+        observed_joint_count = len(joints)
+        joint_count_error = abs(observed_joint_count - expected_joint_count) / max(1.0, float(expected_joint_count))
 
-    expected_joint_count = expected_joint_count_for_type(detected_type)
-    observed_joint_count = len(joints)
-    joint_count_error = abs(observed_joint_count - expected_joint_count) / max(1.0, float(expected_joint_count))
+        missing_types = len([name for name in required_names if name not in observed_names])
+        extra_types = len([name for name in observed_names if name not in set(required_names)])
+        graph_edit_distance_proxy = missing_types + extra_types + abs(observed_joint_count - expected_joint_count)
 
-    missing_types = len([name for name in required_names if name not in observed_names])
-    extra_types = len([name for name in observed_names if name not in set(required_names)])
-    graph_edit_distance_proxy = missing_types + extra_types + abs(observed_joint_count - expected_joint_count)
+        floating_components = int(constraints_report.get("floating_components", 0))
+        physical_validity_score = max(0.0, 1.0 - min(1.0, 0.25 * floating_components + 0.25 * joint_count_error))
 
-    floating_components = int(constraints_report.get("floating_components", 0))
-    physical_validity_score = max(0.0, 1.0 - min(1.0, 0.25 * floating_components + 0.25 * joint_count_error))
+        return {
+            "component_coverage": round(component_coverage, 4),
+            "component_count_error": round(normalized_count_error, 4),
+            "joint_count_error": round(joint_count_error, 4),
+            "graph_edit_distance_proxy": int(graph_edit_distance_proxy),
+            "physical_validity_score": round(physical_validity_score, 4),
+            "confidence_score": round(float(confidence), 4),
+        }
 
-    return {
-        "component_coverage": round(component_coverage, 4),
-        "component_count_error": round(normalized_count_error, 4),
-        "joint_count_error": round(joint_count_error, 4),
-        "graph_edit_distance_proxy": int(graph_edit_distance_proxy),
-        "physical_validity_score": round(physical_validity_score, 4),
-        "confidence_score": round(float(confidence), 4),
-    }
+    @staticmethod
+    def build_escalation_decision(
+        review_flags: list[str],
+        validation_metrics: dict[str, float | int | bool],
+        constraints_report: dict[str, float | int | bool],
+    ) -> dict[str, str | float | bool | list[str]]:
+        component_coverage = float(validation_metrics.get("component_coverage", 0.0))
+        physical_validity = float(validation_metrics.get("physical_validity_score", 0.0))
+        confidence_score = float(validation_metrics.get("confidence_score", 0.0))
+        graph_proxy = float(validation_metrics.get("graph_edit_distance_proxy", 0.0))
+        requires_review = bool(constraints_report.get("requires_review", False))
 
+        score = 0.0
+        if requires_review:
+            score += 0.45
+        if component_coverage < 0.7:
+            score += 0.25
+        if physical_validity < 0.6:
+            score += 0.2
+        if confidence_score < 0.45:
+            score += 0.1
+        if graph_proxy >= 4:
+            score += 0.2
 
-def build_escalation_decision(
-    review_flags: list[str],
-    validation_metrics: dict[str, float | int | bool],
-    constraints_report: dict[str, float | int | bool],
-) -> dict[str, str | float | bool | list[str]]:
-    component_coverage = float(validation_metrics.get("component_coverage", 0.0))
-    physical_validity = float(validation_metrics.get("physical_validity_score", 0.0))
-    confidence_score = float(validation_metrics.get("confidence_score", 0.0))
-    graph_proxy = float(validation_metrics.get("graph_edit_distance_proxy", 0.0))
-    requires_review = bool(constraints_report.get("requires_review", False))
+        geometry_threshold = get_escalation_geometry_threshold()
+        mvs_threshold = max(geometry_threshold, get_escalation_mvs_threshold())
 
-    score = 0.0
-    if requires_review:
-        score += 0.45
-    if component_coverage < 0.7:
-        score += 0.25
-    if physical_validity < 0.6:
-        score += 0.2
-    if confidence_score < 0.45:
-        score += 0.1
-    if graph_proxy >= 4:
-        score += 0.2
+        strategy = EscalationStrategy.FAST_2D_FUSION
+        human_review = False
+        if score >= mvs_threshold:
+            strategy = EscalationStrategy.ESCALATE_MVS_REFINEMENT
+            human_review = True
+        elif score >= geometry_threshold:
+            strategy = EscalationStrategy.ESCALATE_GEOMETRY_OPTIMIZATION
+            human_review = True
 
-    geometry_threshold = get_escalation_geometry_threshold()
-    mvs_threshold = max(geometry_threshold, get_escalation_mvs_threshold())
-
-    strategy = EscalationStrategy.FAST_2D_FUSION
-    human_review = False
-    if score >= mvs_threshold:
-        strategy = EscalationStrategy.ESCALATE_MVS_REFINEMENT
-        human_review = True
-    elif score >= geometry_threshold:
-        strategy = EscalationStrategy.ESCALATE_GEOMETRY_OPTIMIZATION
-        human_review = True
-
-    return {
-        "escalation_score": round(min(1.0, score), 4),
-        "strategy": strategy.value,
-        "human_review_required": human_review,
-        "geometry_threshold": round(geometry_threshold, 4),
-        "mvs_threshold": round(mvs_threshold, 4),
-        "reasons": review_flags,
-    }
+        return {
+            "escalation_score": round(min(1.0, score), 4),
+            "strategy": strategy.value,
+            "human_review_required": human_review,
+            "geometry_threshold": round(geometry_threshold, 4),
+            "mvs_threshold": round(mvs_threshold, 4),
+            "reasons": review_flags,
+        }
 
 
 def joint_id(parent_component_id: str, child_component_id: str, joint_type: JointType) -> str:
@@ -1377,14 +1380,14 @@ def assemble_project(
 
     index = component_index(components)
     constraints_report, review_flags = build_constraints_report(components, joints)
-    validation_metrics = compute_validation_metrics(
+    validation_metrics = ValidationMetricsCalculator.compute_validation_metrics(
         detected_type,
         components,
         joints,
         confidence,
         constraints_report,
     )
-    escalation = build_escalation_decision(review_flags, validation_metrics, constraints_report)
+    escalation = ValidationMetricsCalculator.build_escalation_decision(review_flags, validation_metrics, constraints_report)
     deterministic_hash = deterministic_hash_payload(detected_type, components, joints)
 
     return InferResponse(
