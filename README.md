@@ -16,7 +16,6 @@ This repository now contains a runnable starter architecture aligned with class 
 - projects/frontend: web application (consumes backend only)
 - projects/infra: additional compose setup
 - .devcontainer: containerized development environment (no local Python or Node install required)
-- PAPER.md, PLAN.md, PROPOSAL.md: project documentation
 
 ## Dev Container First (recommended)
 
