@@ -3,13 +3,28 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from app.presentation.schemas.project_design import (
+    ComponentCategory,
+    ComponentKind,
+    HardwareMountFace,
+    JointRule,
+)
 
 
 class InferenceComponent(BaseModel):
     id: str
-    name: str
-    kind: Literal["panel", "support", "hardware", "assembly"]
-    quantity: int = Field(..., ge=1)
+    kind: ComponentKind
+    category: ComponentCategory | None = None
+    material_id: str | None = None
+    width: float = Field(..., gt=0)
+    height: float = Field(..., gt=0)
+    depth: float = Field(..., gt=0)
+
+
+class InferenceFaceEvidence(BaseModel):
+    id: str
+    component_id: str
+    normal: HardwareMountFace
 
 
 class InferenceInteriorAssessment(BaseModel):
@@ -31,18 +46,12 @@ class InferenceUncertaintyAssessment(BaseModel):
 
 class InferenceJointEvidence(BaseModel):
     id: str
-    parent_component_id: str
-    child_component_id: str
-    joint_type: Literal[
-        "cam_lock",
-        "shelf_pin",
-        "screw",
-        "hinge",
-        "sliding_track",
-        "telescopic_slide",
-        "bracket",
-    ]
-    count: int = Field(..., ge=1)
+    parent_face_id: str
+    child_face_id: str
+    joint_rule: JointRule | None = None
+    offset_u: float = 0.0
+    offset_v: float = 0.0
+    clearance: float = 0.0
 
 
 class InferenceHardwareRecommendation(BaseModel):
@@ -68,11 +77,11 @@ class InferenceImageOutput(BaseModel):
     suggested_height: float = Field(..., gt=0)
     suggested_depth: float = Field(..., gt=0)
     components: list[InferenceComponent]
-    component_index: dict[str, InferenceComponent] | None = None
+    faces: list[InferenceFaceEvidence]
+    joints: list[InferenceJointEvidence]
     interior: InferenceInteriorAssessment | None = None
     door: InferenceDoorAssessment | None = None
     uncertainty: InferenceUncertaintyAssessment | None = None
-    joints: list[InferenceJointEvidence] | None = None
     hardware: list[InferenceHardwareRecommendation] | None = None
     image_url: str = Field(..., min_length=8)
 
@@ -93,11 +102,11 @@ class InferenceOutput(BaseModel):
     suggested_height: float = Field(..., gt=0)
     suggested_depth: float = Field(..., gt=0)
     components: list[InferenceComponent]
-    component_index: dict[str, InferenceComponent] | None = None
+    faces: list[InferenceFaceEvidence]
+    joints: list[InferenceJointEvidence]
     interior: InferenceInteriorAssessment | None = None
     door: InferenceDoorAssessment | None = None
     uncertainty: InferenceUncertaintyAssessment | None = None
-    joints: list[InferenceJointEvidence] | None = None
     hardware: list[InferenceHardwareRecommendation] | None = None
     image_url: str = Field(..., min_length=8)
     images_analyzed: int | None = Field(default=None, ge=1)

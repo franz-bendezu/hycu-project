@@ -6,40 +6,87 @@ from fastapi.testclient import TestClient
 
 from app.api.routers import analysis, projects
 from app.main import app
+from app.presentation.schemas.inference import InferenceOutput
 
 
-def _component(name: str, kind: str, quantity: int) -> dict:
-    return {"id": f"cmp_{name}", "name": name, "kind": kind, "quantity": quantity}
+def _component(kind: str, suffix: str) -> dict:
+    return {
+        "id": f"cmp_{kind}_{suffix}",
+        "kind": kind,
+        "category": "structural",
+        "width": 100.0,
+        "height": 100.0,
+        "depth": 18.0,
+    }
 
 
 def _components_for_type(detected_type: str) -> list[dict]:
     if detected_type == "desk":
         return [
-            _component("desktop", "panel", 1),
-            _component("left_side_panel", "panel", 1),
-            _component("right_side_panel", "panel", 1),
-            _component("back_panel", "panel", 1),
-            _component("front_apron", "support", 1),
+            _component("top_panel", "1"),
+            _component("left_side", "1"),
+            _component("right_side", "1"),
+            _component("back_panel", "1"),
+            _component("front_panel", "1"),
         ]
 
     if detected_type == "shelf":
         return [
-            _component("top_panel", "panel", 1),
-            _component("bottom_panel", "panel", 1),
-            _component("left_side_panel", "panel", 1),
-            _component("right_side_panel", "panel", 1),
-            _component("shelf_panel", "panel", 3),
-            _component("back_panel", "panel", 1),
+            _component("top_panel", "1"),
+            _component("bottom_panel", "1"),
+            _component("left_side", "1"),
+            _component("right_side", "1"),
+            _component("shelf", "1"),
+            _component("shelf", "2"),
+            _component("shelf", "3"),
+            _component("back_panel", "1"),
         ]
 
     return [
-        _component("top_panel", "panel", 1),
-        _component("bottom_panel", "panel", 1),
-        _component("left_side_panel", "panel", 1),
-        _component("right_side_panel", "panel", 1),
-        _component("door_panel", "panel", 2),
-        _component("shelf_panel", "panel", 3),
-        _component("back_panel", "panel", 1),
+        _component("top_panel", "1"),
+        _component("bottom_panel", "1"),
+        _component("left_side", "1"),
+        _component("right_side", "1"),
+        _component("door_panel", "1"),
+        _component("door_panel", "2"),
+        _component("shelf", "1"),
+        _component("shelf", "2"),
+        _component("shelf", "3"),
+        _component("back_panel", "1"),
+    ]
+
+
+def _faces_for_components(components: list[dict]) -> list[dict]:
+    normals = ["+x", "-x", "+y", "-y", "+z", "-z"]
+    faces: list[dict] = []
+    for component in components:
+        component_id = component["id"]
+        for normal in normals:
+            faces.append(
+                {
+                    "id": f"{component_id}:{normal}",
+                    "component_id": component_id,
+                    "normal": normal,
+                }
+            )
+    return faces
+
+
+def _joints_for_components(components: list[dict]) -> list[dict]:
+    if len(components) < 2:
+        return []
+    parent_id = components[0]["id"]
+    child_id = components[1]["id"]
+    return [
+        {
+            "id": f"joint_{parent_id}_{child_id}",
+            "parent_face_id": f"{parent_id}:+x",
+            "child_face_id": f"{child_id}:-x",
+            "joint_rule": "overlap",
+            "offset_u": 0.0,
+            "offset_v": 0.0,
+            "clearance": 0.0,
+        }
     ]
 
 
@@ -56,30 +103,25 @@ class TestInferenceGateway:
             detected_type = "shelf"
             width, height, depth = 900.0, 1700.0, 300.0
 
+        components = _components_for_type(detected_type)
+        faces = _faces_for_components(components)
+        joints = _joints_for_components(components)
         return {
             "detected_type": detected_type,
             "confidence": 0.94,
             "suggested_width": width,
             "suggested_height": height,
             "suggested_depth": depth,
-            "components": _components_for_type(detected_type),
+            "components": components,
+            "faces": faces,
+            "joints": joints,
             "image_url": image_url,
         }
 
-    def infer_many(self, image_urls: list[str]) -> dict:
+    def infer_many(self, image_urls: list[str]) -> InferenceOutput:
         results = [self.infer(url) for url in image_urls]
-        # Keep compatibility with existing downstream project generation by returning
-        # the same top-level fields while exposing batch metadata.
         best = max(results, key=lambda item: float(item["confidence"]))
-        merged_components: dict[str, dict] = {}
-        for result in results:
-            for component in result["components"]:
-                current = merged_components.get(component["name"])
-                if current is None or component["quantity"] > current["quantity"]:
-                    merged_components[component["name"]] = component
-
         payload = dict(best)
-        payload["components"] = [merged_components[key] for key in sorted(merged_components)]
         payload["images_analyzed"] = len(results)
         payload["image_results"] = [
             {
@@ -93,9 +135,9 @@ class TestInferenceGateway:
             for item in results
         ]
         payload["image_url"] = image_urls[0]
-        return payload
+        return InferenceOutput.model_validate(payload)
 
-    def submit(self, image_urls: list[str]) -> tuple[str, dict]:
+    def submit(self, image_urls: list[str]) -> tuple[str, InferenceOutput]:
         return str(uuid.uuid4()), self.infer_many(image_urls)
 
 
@@ -746,10 +788,13 @@ def test_create_project_maps_detection_layout_into_joint_positions(monkeypatch) 
     model = create_response.json()["model"]
 
     components_by_id = {component["id"]: component for component in model["components"]}
+    def _component_id_from_face_id(face_id: str) -> str:
+        return face_id.split(":", 1)[0]
+
     door_joint_positions = [
-        joint["pos_x"]
+        joint["offset_u"]
         for joint in model["joints"]
-        if components_by_id.get(joint["child_id"], {}).get("kind") == "door_panel"
+        if components_by_id.get(_component_id_from_face_id(joint["child_face_id"]), {}).get("kind") == "door_panel"
     ]
 
     assert len(door_joint_positions) == 2

@@ -4,6 +4,7 @@ import base64
 import datetime
 import json
 import uuid
+from pydantic import ValidationError
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
@@ -14,16 +15,7 @@ from app.infrastructure.gateways.inference_gateway import (
     get_inference_gateway,
 )
 from app.domain.services.model_generator import ModelGenerator
-from ...domain.services.inference_projection import (
-    infer_model_type,
-    facade_counts_from_inference,
-    divider_count_from_inference,
-    has_divider_evidence,
-    facade_evidence_from_inference,
-    normalize_facade_counts,
-    shelf_count_from_inference,
-    apply_inference_layout_to_joints,
-)
+from ...domain.services.vision_model_builder import build_project_model_from_inference
 from ...domain.services.artifact_builder import (
     build_blueprint_pdf,
     build_bom_csv,
@@ -38,6 +30,7 @@ from app.infrastructure.persistence.models import (
     ProjectAsset,
 )
 from app.presentation.schemas.project_design import ProductSpec, ProjectModel
+from app.presentation.schemas.inference import InferenceOutput
 from app.presentation.schemas.projects import (
     CreateProjectAssetResponse,
     CreateProjectJobRequest,
@@ -59,11 +52,42 @@ router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 generator = ModelGenerator()
 client = get_inference_gateway()
 
+
+def _build_or_extract_project_model(
+    *,
+    inference_result: InferenceOutput,
+    project_name: str,
+    fallback_type: str,
+    material_thickness: float = 18.0,
+) -> ProjectModel:
+    model = build_project_model_from_inference(
+        inference_result,
+        project_name=project_name,
+        fallback_type=fallback_type,
+        material_thickness=material_thickness,
+    )
+    return model
+
 def _get_project_or_404(project_id: str, db: Session) -> Project:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+def _validated_result_or_422(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    payload = json.loads(raw)
+    if isinstance(payload, dict):
+        try:
+            InferenceOutput.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Stored job result does not match strict inference schema: {exc.errors()[0]['msg']}",
+            ) from exc
+    return payload
 
 
 @router.get("", response_model=ProjectsListResponse)
@@ -96,49 +120,29 @@ def create_project(
             raise HTTPException(status_code=409, detail="Job is not complete")
 
         result = json.loads(job.result_json or "{}")
+        try:
+            inference_result = InferenceOutput.model_validate(result)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Inference payload does not match DTO schema: {exc.errors()[0]['msg']}",
+            ) from exc
         default_name = payload.name or job.project_name or default_name
-        inferred_type = infer_model_type(result, fallback="cabinet")
-        door_count, drawer_count = facade_counts_from_inference(result)
-        if door_count + drawer_count > 0:
-            inferred_type = "cabinet"
-        shelf_count = shelf_count_from_inference(result, inferred_type)
-        divider_count = divider_count_from_inference(
-            result,
-            inferred_type=inferred_type,
-            door_count=door_count,
-            drawer_count=drawer_count,
+        model = _build_or_extract_project_model(
+            inference_result=inference_result,
+            project_name=default_name,
+            fallback_type="cabinet",
         )
-        has_divider_evidence_flag = has_divider_evidence(result)
-        evidence = facade_evidence_from_inference(result)
-        door_count, drawer_count = normalize_facade_counts(
-            inferred_type=inferred_type,
-            door_count=door_count,
-            drawer_count=drawer_count,
-            divider_count=divider_count,
-            has_divider_evidence_flag=has_divider_evidence_flag,
-            shelf_count=shelf_count,
-            evidence=evidence,
-        )
-        spec = ProductSpec(
-            name=default_name,
-            inferred_type=inferred_type,
-            target_width=result["suggested_width"],
-            target_height=result["suggested_height"],
-            target_depth=result["suggested_depth"],
-            shelf_count=shelf_count,
-            divider_count=divider_count,
-            door_count=door_count,
-            drawer_count=drawer_count,
-        )
+        job.result_json = json.dumps(result)
+        report = generator.validate(model)
+        if not report.valid:
+            raise HTTPException(status_code=422, detail="Vision-first model failed validation")
     else:
         spec = ProductSpec(name=default_name)
-
-    model = generator.generate(spec)
-    if result is not None:
-        apply_inference_layout_to_joints(model, result)
-    report = generator.validate(model)
-    if not report.valid:
-        raise HTTPException(status_code=422, detail="Generated model failed validation")
+        model = generator.generate(spec)
+        report = generator.validate(model)
+        if not report.valid:
+            raise HTTPException(status_code=422, detail="Generated model failed validation")
 
     project_id = str(uuid.uuid4())
     project = Project(id=project_id, name=default_name, model_json=model.model_dump_json())
@@ -246,11 +250,20 @@ def create_project_job(
     image_data_list = [asset.image_data for asset in assets]
 
     try:
-        job_id, result = client.submit(image_data_list)
+        job_id, inference_result = client.submit(image_data_list)
     except InferenceGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    result = inference_result.model_dump(mode="json")
     result["source_asset_ids"] = [asset.id for asset in assets]
+
+    current_model = ProjectModel.model_validate_json(project.model_json)
+    updated_model = _build_or_extract_project_model(
+        inference_result=inference_result,
+        project_name=current_model.product.name,
+        fallback_type=current_model.product.inferred_type,
+        material_thickness=current_model.product.material_thickness,
+    )
 
     job = JobModel(
         id=job_id,
@@ -263,13 +276,13 @@ def create_project_job(
     db.add(job)
 
     asset_ids = result.get("source_asset_ids")
-    image_results = result.get("image_results")
+    image_results = inference_result.image_results
     if isinstance(asset_ids, list) and isinstance(image_results, list):
         pair_count = min(len(asset_ids), len(image_results))
         for idx in range(pair_count):
             asset_id = asset_ids[idx]
-            image_result = image_results[idx]
-            if not isinstance(asset_id, str) or not isinstance(image_result, dict):
+            image_result = image_results[idx].model_dump(mode="json")
+            if not isinstance(asset_id, str):
                 continue
             db.add(
                 JobAssetResult(
@@ -280,45 +293,9 @@ def create_project_job(
                 )
             )
 
-    current_model = ProjectModel.model_validate_json(project.model_json)
-    inferred_type = infer_model_type(result, fallback=current_model.product.inferred_type)
-    door_count, drawer_count = facade_counts_from_inference(result)
-    if door_count + drawer_count > 0:
-        inferred_type = "cabinet"
-    shelf_count = shelf_count_from_inference(result, inferred_type)
-    divider_count = divider_count_from_inference(
-        result,
-        inferred_type=inferred_type,
-        door_count=door_count,
-        drawer_count=drawer_count,
-    )
-    has_divider_evidence_flag = has_divider_evidence(result)
-    evidence = facade_evidence_from_inference(result)
-    door_count, drawer_count = normalize_facade_counts(
-        inferred_type=inferred_type,
-        door_count=door_count,
-        drawer_count=drawer_count,
-        divider_count=divider_count,
-        has_divider_evidence_flag=has_divider_evidence_flag,
-        shelf_count=shelf_count,
-        evidence=evidence,
-    )
-    spec = ProductSpec(
-        name=current_model.product.name,
-        inferred_type=inferred_type,
-        target_width=result["suggested_width"],
-        target_height=result["suggested_height"],
-        target_depth=result["suggested_depth"],
-        shelf_count=shelf_count,
-        divider_count=divider_count,
-        door_count=door_count,
-        drawer_count=drawer_count,
-    )
-    updated_model = generator.generate(spec)
-    apply_inference_layout_to_joints(updated_model, result)
     report = generator.validate(updated_model)
     if not report.valid:
-        raise HTTPException(status_code=422, detail="Generated model failed validation")
+        raise HTTPException(status_code=422, detail="Vision-first model failed validation")
     project.model_json = updated_model.model_dump_json()
     db.commit()
 
@@ -349,7 +326,7 @@ def list_project_jobs(project_id: str, db: Session = Depends(get_db)) -> Project
             JobResponse(
                 job_id=job.id,
                 status=job.status,
-                result=json.loads(job.result_json) if job.result_json else None,
+                result=_validated_result_or_422(job.result_json),
                 project_id=job.project_id,
                 asset_id=job.asset_id,
             )
@@ -368,6 +345,8 @@ def get_project_job(
         raise HTTPException(status_code=404, detail="Project job not found")
 
     result = json.loads(job.result_json) if job.result_json else None
+    if job.result_json:
+        result = _validated_result_or_422(job.result_json)
     asset_results_rows = (
         db.query(JobAssetResult)
         .filter(JobAssetResult.job_id == job_id)

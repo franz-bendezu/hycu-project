@@ -1,18 +1,53 @@
 from __future__ import annotations
 
 import uuid
+from importlib import import_module
 
 from app.domain import ComponentSpec, HardwareSpec, ProductSpec, ProjectDesign
 from app.presentation.schemas.project_design import (
     ComponentCategory,
     ComponentKind,
+    FaceSpec,
     FeatureSpec,
     HardwareAnchor,
+    HardwareMountFace,
+    HardwareMountTarget,
     JointRule,
     JointSpec,
     MaterialSpec,
 )
 from app.domain.services.rule_validator import ProjectRuleValidator, ValidationResult
+
+
+def _assign_component_transforms(product: ProductSpec, components: list[ComponentSpec], joints: list[JointSpec]) -> None:
+    module = import_module("app.domain.services.component_transformer")
+    module.assign_component_transforms(product=product, components=components, joints=joints)
+
+
+FACE_ORDER: tuple[HardwareMountFace, ...] = (
+    HardwareMountFace.POS_X,
+    HardwareMountFace.NEG_X,
+    HardwareMountFace.POS_Y,
+    HardwareMountFace.NEG_Y,
+    HardwareMountFace.POS_Z,
+    HardwareMountFace.NEG_Z,
+)
+
+
+def _face_id(component_id: str, face: HardwareMountFace) -> str:
+    return f"{component_id}:{face.value}:{uuid.uuid4()}"
+
+
+def _component_id_from_face_id(face_id: str) -> str:
+    return face_id.split(":", 1)[0]
+
+
+def _set_component_faces(components: list[ComponentSpec]) -> None:
+    for component in components:
+        component.faces = [
+            FaceSpec(id=_face_id(component.id, face), component_id=component.id, normal=face)
+            for face in FACE_ORDER
+        ]
 
 
 class ModelGenerator:
@@ -32,14 +67,16 @@ class ModelGenerator:
         )
 
         components = self._build_components(spec)
+        _set_component_faces(components)
         for component in components:
             component.material_id = default_material.id
             component.category = self._category_for_kind(component.kind)
 
         joints = self._build_joints(spec, components)
+        _assign_component_transforms(product=spec, components=components, joints=joints)
         features = self._build_features(joints)
         self._assign_uuid_component_ids(components, joints, features)
-        hardware = self._build_hardware(spec)
+        hardware = self._build_hardware(spec, components)
         warnings = self._generate_warnings(spec)
         return ProjectDesign(
             product=spec,
@@ -61,14 +98,16 @@ class ModelGenerator:
                 setattr(spec, key, value)
 
         components = self._build_components(spec)
+        _set_component_faces(components)
         for component in components:
             component.material_id = model.materials[0].id if model.materials else "material_board_default"
             component.category = self._category_for_kind(component.kind)
 
         joints = self._build_joints(spec, components)
+        _assign_component_transforms(product=spec, components=components, joints=joints)
         features = self._build_features(joints)
         self._assign_uuid_component_ids(components, joints, features)
-        hardware = self._build_hardware(spec)
+        hardware = self._build_hardware(spec, components)
         warnings = self._generate_warnings(spec)
 
         return ProjectDesign(
@@ -87,16 +126,53 @@ class ModelGenerator:
         joints: list[JointSpec],
         features: list[FeatureSpec],
     ) -> None:
+        old_face_index: dict[str, tuple[str, HardwareMountFace]] = {
+            face.id: (component.id, face.normal)
+            for component in components
+            for face in component.faces
+        }
+
         id_map: dict[str, str] = {}
         for component in components:
             original_id = component.id
             uuid_id = str(uuid.uuid4())
             id_map[original_id] = uuid_id
             component.id = uuid_id
+            component.faces = [
+                FaceSpec(
+                    id=_face_id(uuid_id, face.normal),
+                    component_id=uuid_id,
+                    normal=face.normal,
+                )
+                for face in component.faces
+            ]
+
+        new_face_index: dict[tuple[str, HardwareMountFace], str] = {
+            (component.id, face.normal): face.id
+            for component in components
+            for face in component.faces
+        }
 
         for joint in joints:
-            joint.parent_id = id_map.get(joint.parent_id, joint.parent_id)
-            joint.child_id = id_map.get(joint.child_id, joint.child_id)
+            parent_component_id, parent_face = old_face_index.get(
+                joint.parent_face_id,
+                (
+                    _component_id_from_face_id(joint.parent_face_id),
+                    HardwareMountFace(joint.parent_face_id.split(":")[1]),
+                ),
+            )
+            child_component_id, child_face = old_face_index.get(
+                joint.child_face_id,
+                (
+                    _component_id_from_face_id(joint.child_face_id),
+                    HardwareMountFace(joint.child_face_id.split(":")[1]),
+                ),
+            )
+            mapped_parent_id = id_map.get(parent_component_id, parent_component_id)
+            mapped_child_id = id_map.get(child_component_id, child_component_id)
+            joint.parent_face_id = new_face_index[(mapped_parent_id, parent_face)]
+            joint.child_face_id = new_face_index[(mapped_child_id, child_face)]
+            joint.id = str(uuid.uuid4())
 
         for feature in features:
             feature.component_id = id_map.get(feature.component_id, feature.component_id)
@@ -129,12 +205,7 @@ class ModelGenerator:
         profile = (getattr(spec, "inferred_type", "") or "").strip().lower()
         if profile in {"cabinet", "desk", "shelf"}:
             return profile
-        # Legacy fallback for models created before inferred_type existed.
-        if spec.shelf_count == 0:
-            return "desk"
-        if spec.shelf_count >= 4:
-            return "shelf"
-        return "cabinet"
+        raise ValueError("Product spec must include inferred_type in {'cabinet','desk','shelf'}")
 
     def _build_cabinet_components(self, spec: ProductSpec) -> list[ComponentSpec]:
         inner_width = spec.target_width - (2 * spec.material_thickness)
@@ -392,7 +463,84 @@ class ModelGenerator:
             ),
         ]
 
-    def _build_hardware(self, spec: ProductSpec) -> list[HardwareSpec]:
+    def _build_hardware(self, spec: ProductSpec, components: list[ComponentSpec]) -> list[HardwareSpec]:
+        door_components = [component for component in components if component.kind == ComponentKind.DOOR_PANEL]
+        drawer_components = [component for component in components if component.kind == ComponentKind.DRAWER_FRONT]
+        front_components = [component for component in components if component.kind == ComponentKind.FRONT_PANEL]
+        front_like_components = [
+            component
+            for component in components
+            if component.kind in {ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT, ComponentKind.FRONT_PANEL}
+        ]
+
+        def _preferred_components(anchor: HardwareAnchor) -> list[ComponentSpec]:
+            if anchor == HardwareAnchor.CAM_LOCK_15MM and (drawer_components or door_components):
+                return drawer_components or door_components
+            if anchor == HardwareAnchor.CORNER_BRACKET_40 and front_components:
+                return front_components
+            if front_like_components:
+                return front_like_components
+            return []
+
+        def _default_mount_targets(anchor: HardwareAnchor, qty: int) -> list[HardwareMountTarget]:
+            targets: list[HardwareMountTarget] = []
+            preferred = _preferred_components(anchor)
+            if not preferred:
+                return targets
+
+            def _offset(component: ComponentSpec, component_idx: int, local_idx: int) -> tuple[float, float, float]:
+                width = max(component.width, 1.0)
+                height = max(component.height, 1.0)
+                depth = max(component.depth, 1.0)
+
+                x_inset = max(10.0, min(85.0, width * 0.38))
+                y_inset = max(16.0, min(220.0, height * 0.35))
+                z_local = round(depth * 0.5, 3)
+
+                if anchor.name == "HINGE_SOFT_CLOSE_110":
+                    side = -1.0 if component_idx % 2 == 0 else 1.0
+                    y_slots = [-y_inset, y_inset, 0.0]
+                    return (round(side * x_inset, 3), round(y_slots[local_idx % len(y_slots)], 3), z_local)
+
+                if anchor == HardwareAnchor.CAM_LOCK_15MM:
+                    corners = [(-x_inset, -y_inset), (x_inset, -y_inset), (-x_inset, y_inset), (x_inset, y_inset)]
+                    x, y = corners[local_idx % len(corners)]
+                    return (round(x, 3), round(y, 3), z_local)
+
+                if anchor == HardwareAnchor.WOOD_SCREW_4X40:
+                    perimeter = [
+                        (-x_inset, -y_inset),
+                        (0.0, -y_inset),
+                        (x_inset, -y_inset),
+                        (-x_inset, 0.0),
+                        (x_inset, 0.0),
+                        (-x_inset, y_inset),
+                        (0.0, y_inset),
+                        (x_inset, y_inset),
+                    ]
+                    x, y = perimeter[local_idx % len(perimeter)]
+                    return (round(x, 3), round(y, 3), z_local)
+
+                broad = [(-x_inset, -y_inset), (x_inset, -y_inset), (-x_inset, y_inset), (x_inset, y_inset), (0.0, 0.0)]
+                x, y = broad[local_idx % len(broad)]
+                return (round(x, 3), round(y, 3), z_local)
+
+            for idx in range(max(qty, 0)):
+                component_idx = idx % len(preferred)
+                component = preferred[component_idx]
+                local_x, local_y, local_z = _offset(component, component_idx=component_idx, local_idx=idx // len(preferred))
+                targets.append(
+                    HardwareMountTarget(
+                        component_id=component.id,
+                        face=HardwareMountFace.POS_Z,
+                        local_x=local_x,
+                        local_y=local_y,
+                        local_z=local_z,
+                        normal_offset_mm=2.0,
+                    )
+                )
+            return targets
+
         def _hardware(anchor: HardwareAnchor, qty: int) -> HardwareSpec:
             code = anchor.name
             lower = code.lower()
@@ -403,6 +551,7 @@ class ModelGenerator:
                 anchor=anchor,
                 mesh_path=f"assets/hardware/{lower}.glb",
                 svg_path=f"assets/hardware/{lower}.svg",
+                mount_targets=_default_mount_targets(anchor, qty),
             )
 
         profile = self._profile_for_spec(spec)
@@ -429,28 +578,32 @@ class ModelGenerator:
     def _build_joints(self, spec: ProductSpec, components: list[ComponentSpec]) -> list[JointSpec]:
         by_id = {component.id: component for component in components}
         joints: list[JointSpec] = []
+        face_index = {
+            (component.id, face.normal): face.id
+            for component in components
+            for face in component.faces
+        }
 
         def add_joint(
             parent_id: str,
             child_id: str,
-            pos_x: float,
-            pos_y: float,
-            pos_z: float,
+            parent_face: HardwareMountFace,
+            child_face: HardwareMountFace,
+            offset_u: float = 0.0,
+            offset_v: float = 0.0,
             rule: str | None = None,
         ) -> None:
             if parent_id not in by_id or child_id not in by_id:
                 return
             joints.append(
                 JointSpec(
-                    parent_id=parent_id,
-                    child_id=child_id,
+                    id=str(uuid.uuid4()),
+                    parent_face_id=face_index[(parent_id, parent_face)],
+                    child_face_id=face_index[(child_id, child_face)],
                     joint_rule=rule,
-                    pos_x=round(pos_x, 3),
-                    pos_y=round(pos_y, 3),
-                    pos_z=round(pos_z, 3),
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
+                    offset_u=round(offset_u, 3),
+                    offset_v=round(offset_v, 3),
+                    clearance=0.0,
                 )
             )
 
@@ -463,41 +616,37 @@ class ModelGenerator:
                 "right_leg_back",
             ]
             for leg_id in leg_ids:
-                add_joint("top", leg_id, 0.0, -spec.target_height / 2, 0.0)
-            add_joint("top", "front_apron", 0.0, -spec.target_height / 2 + 80, spec.target_depth / 2 - 18)
-            add_joint("top", "back_apron", 0.0, -spec.target_height / 2 + 80, -spec.target_depth / 2 + 18)
+                add_joint("top", leg_id, HardwareMountFace.NEG_Y, HardwareMountFace.POS_Y)
+            add_joint("top", "front_apron", HardwareMountFace.NEG_Y, HardwareMountFace.POS_Y)
+            add_joint("top", "back_apron", HardwareMountFace.NEG_Y, HardwareMountFace.POS_Y)
             return joints
 
         add_joint(
             "left_side",
             "top",
-            0.0,
-            spec.target_height / 2 - spec.material_thickness / 2,
-            0.0,
+            HardwareMountFace.POS_Y,
+            HardwareMountFace.NEG_X,
             rule=JointRule.OVERLAP,
         )
         add_joint(
             "right_side",
             "top",
-            0.0,
-            spec.target_height / 2 - spec.material_thickness / 2,
-            0.0,
+            HardwareMountFace.POS_Y,
+            HardwareMountFace.POS_X,
             rule=JointRule.OVERLAP,
         )
         add_joint(
             "left_side",
             "bottom",
-            0.0,
-            -spec.target_height / 2 + spec.material_thickness / 2,
-            0.0,
+            HardwareMountFace.NEG_Y,
+            HardwareMountFace.NEG_X,
             rule=JointRule.INSET,
         )
         add_joint(
             "right_side",
             "bottom",
-            0.0,
-            -spec.target_height / 2 + spec.material_thickness / 2,
-            0.0,
+            HardwareMountFace.NEG_Y,
+            HardwareMountFace.POS_X,
             rule=JointRule.INSET,
         )
 
@@ -505,17 +654,15 @@ class ModelGenerator:
             add_joint(
                 "left_side",
                 "back_panel",
-                0.0,
-                0.0,
-                -spec.target_depth / 2 + spec.material_thickness / 2,
+                HardwareMountFace.NEG_Z,
+                HardwareMountFace.NEG_X,
                 rule=JointRule.FLUSH_BACK,
             )
             add_joint(
                 "right_side",
                 "back_panel",
-                0.0,
-                0.0,
-                -spec.target_depth / 2 + spec.material_thickness / 2,
+                HardwareMountFace.NEG_Z,
+                HardwareMountFace.POS_X,
                 rule=JointRule.FLUSH_BACK,
             )
 
@@ -524,8 +671,22 @@ class ModelGenerator:
         usable_height = max(spec.target_height - (2 * spec.material_thickness), spec.material_thickness)
         for idx, shelf_id in enumerate(shelf_ids):
             shelf_anchor_y = ((0.5 - ((idx + 1) / (shelf_count + 1))) * usable_height) if shelf_count > 0 else 0.0
-            add_joint("left_side", shelf_id, 0.0, shelf_anchor_y, 0.0, rule=JointRule.BETWEEN)
-            add_joint("right_side", shelf_id, 0.0, shelf_anchor_y, 0.0, rule=JointRule.BETWEEN)
+            add_joint(
+                "left_side",
+                shelf_id,
+                HardwareMountFace.POS_X,
+                HardwareMountFace.NEG_X,
+                offset_v=shelf_anchor_y,
+                rule=JointRule.BETWEEN,
+            )
+            add_joint(
+                "right_side",
+                shelf_id,
+                HardwareMountFace.NEG_X,
+                HardwareMountFace.POS_X,
+                offset_v=shelf_anchor_y,
+                rule=JointRule.BETWEEN,
+            )
 
         door_ids = [component.id for component in components if component.id.startswith("door_panel_")]
         door_count = len(door_ids)
@@ -537,11 +698,25 @@ class ModelGenerator:
             left_column_width = max(min(inner_width * 0.58, inner_width - spec.material_thickness * 2), spec.material_thickness * 4)
             divider_anchor_x = -inner_width / 2 + left_column_width
             for divider_id in divider_ids:
-                add_joint("bottom", divider_id, divider_anchor_x, 0.0, 0.0, rule=JointRule.BETWEEN)
+                add_joint(
+                    "bottom",
+                    divider_id,
+                    HardwareMountFace.POS_Y,
+                    HardwareMountFace.NEG_Y,
+                    offset_u=divider_anchor_x,
+                    rule=JointRule.BETWEEN,
+                )
         else:
             for idx, divider_id in enumerate(divider_ids):
                 divider_anchor_x = (((idx + 1) / (divider_count + 1)) - 0.5) * inner_width if divider_count > 0 else 0.0
-                add_joint("bottom", divider_id, divider_anchor_x, 0.0, 0.0, rule=JointRule.BETWEEN)
+                add_joint(
+                    "bottom",
+                    divider_id,
+                    HardwareMountFace.POS_Y,
+                    HardwareMountFace.NEG_Y,
+                    offset_u=divider_anchor_x,
+                    rule=JointRule.BETWEEN,
+                )
 
         if mixed_four_front_layout:
             usable_height = max(spec.target_height - (2 * spec.material_thickness), spec.material_thickness)
@@ -561,9 +736,10 @@ class ModelGenerator:
                 add_joint(
                     "top",
                     "door_panel_1",
-                    left_center_x,
-                    top_center_y,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_u=left_center_x,
+                    offset_v=top_center_y,
                     rule=JointRule.MOUNT,
                 )
 
@@ -572,9 +748,10 @@ class ModelGenerator:
                 add_joint(
                     "bottom",
                     "drawer_front_1",
-                    left_center_x,
-                    drawer_center_y,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_u=left_center_x,
+                    offset_v=drawer_center_y,
                     rule=JointRule.MOUNT,
                 )
 
@@ -583,9 +760,10 @@ class ModelGenerator:
                 add_joint(
                     "left_side",
                     "door_panel_2",
-                    left_center_x,
-                    bottom_left_center_y,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_u=left_center_x,
+                    offset_v=bottom_left_center_y,
                     rule=JointRule.MOUNT,
                 )
 
@@ -594,9 +772,10 @@ class ModelGenerator:
                 add_joint(
                     "right_side",
                     "door_panel_3",
-                    right_center_x,
-                    right_center_y,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_u=right_center_x,
+                    offset_v=right_center_y,
                     rule=JointRule.MOUNT,
                 )
         else:
@@ -606,9 +785,9 @@ class ModelGenerator:
                 add_joint(
                     parent_for_door,
                     door_id,
-                    door_anchor_x,
-                    0.0,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_u=door_anchor_x,
                     rule=JointRule.MOUNT,
                 )
 
@@ -624,9 +803,9 @@ class ModelGenerator:
                 add_joint(
                     "bottom",
                     drawer_id,
-                    0.0,
-                    drawer_anchor_y,
-                    spec.target_depth / 2 - spec.material_thickness / 4,
+                    HardwareMountFace.POS_Z,
+                    HardwareMountFace.NEG_Z,
+                    offset_v=drawer_anchor_y,
                     rule=JointRule.MOUNT,
                 )
 
@@ -637,7 +816,7 @@ class ModelGenerator:
         for index, joint in enumerate(joints):
             features.append(
                 FeatureSpec(
-                    component_id=joint.child_id,
+                    component_id=_component_id_from_face_id(joint.child_face_id),
                     face_index=((index % 6) + 1),
                     u_coord=round((index % 4) * 12.5, 2),
                     v_coord=round((index % 3) * 9.5, 2),

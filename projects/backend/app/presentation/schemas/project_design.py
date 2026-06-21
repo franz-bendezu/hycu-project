@@ -104,6 +104,13 @@ class Component(BaseModel):
     width: float
     height: float
     depth: float
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    pos_z: float = 0.0
+    rot_x_deg: float = 0.0
+    rot_y_deg: float = 0.0
+    rot_z_deg: float = 0.0
+    faces: list["FaceSpec"] = Field(default_factory=list)
 
 
 class HardwareItem(BaseModel):
@@ -122,16 +129,20 @@ class MaterialSpec(BaseModel):
     texture_map_url: str | None = None
 
 
+class FaceSpec(BaseModel):
+    id: str
+    component_id: str
+    normal: HardwareMountFace
+
+
 class JointSpec(BaseModel):
-    parent_id: str
-    child_id: str
+    id: str
+    parent_face_id: str
+    child_face_id: str
     joint_rule: JointRule | None = None
-    pos_x: float = 0.0
-    pos_y: float = 0.0
-    pos_z: float = 0.0
-    rot_x: float = 0.0
-    rot_y: float = 0.0
-    rot_z: float = 0.0
+    offset_u: float = 0.0
+    offset_v: float = 0.0
+    clearance: float = 0.0
 
 
 class FeatureSpec(BaseModel):

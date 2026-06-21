@@ -4,6 +4,7 @@ import base64
 import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.infrastructure.persistence.database import get_db
@@ -13,6 +14,7 @@ from app.infrastructure.gateways.inference_gateway import (
 )
 from app.infrastructure.persistence.models import Job as JobModel, JobAssetResult
 from app.presentation.schemas.analysis import AnalyzeRequest, AnalyzeResponse
+from app.presentation.schemas.inference import InferenceOutput
 from app.presentation.schemas.jobs import JobResponse
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
@@ -32,7 +34,7 @@ def _submit_analysis(
     job = JobModel(
         id=job_id,
         status="complete",
-        result_json=json.dumps(result),
+        result_json=result.model_dump_json(),
         project_name=project_name,
     )
     db.add(job)
@@ -76,6 +78,11 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> JobResponse:
         raise HTTPException(status_code=404, detail="Job not found")
 
     result = json.loads(job.result_json) if job.result_json else None
+    if isinstance(result, dict):
+        try:
+            InferenceOutput.model_validate(result)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"Stored job result does not match strict inference schema: {exc.errors()[0]['msg']}") from exc
     asset_results_rows = (
         db.query(JobAssetResult)
         .filter(JobAssetResult.job_id == job_id)

@@ -5,6 +5,9 @@ import uuid
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
+
+from app.presentation.schemas.inference import InferenceOutput
 
 
 class InferenceGatewayError(Exception):
@@ -16,7 +19,7 @@ class HttpInferenceGateway:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    def _post_infer(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_infer(self, payload: dict[str, Any]) -> InferenceOutput:
         try:
             response = httpx.post(
                 f"{self.base_url}/infer",
@@ -41,67 +44,19 @@ class HttpInferenceGateway:
                 f"Cannot reach inference service at {self.base_url}: {exc}"
             ) from exc
 
-        return response_payload
+        try:
+            return InferenceOutput.model_validate(response_payload)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            loc = ".".join(str(part) for part in first.get("loc", ()))
+            msg = first.get("msg", "Invalid inference payload")
+            where = f" at '{loc}'" if loc else ""
+            raise InferenceGatewayError(f"Inference service payload does not match DTO schema{where}: {msg}") from exc
 
-    def _normalize_result(self, payload: dict[str, Any]) -> dict[str, Any]:
-        required_fields = (
-            "detected_type",
-            "confidence",
-            "suggested_width",
-            "suggested_height",
-            "suggested_depth",
-            "components",
-            "image_url",
-        )
-        missing = [field for field in required_fields if field not in payload]
-        if missing:
-            raise InferenceGatewayError(
-                f"Inference service payload missing required fields: {', '.join(missing)}"
-            )
+    def infer_many(self, image_urls: list[str]) -> InferenceOutput:
+        return self._post_infer({"image_urls": image_urls})
 
-        components = payload["components"]
-        if not isinstance(components, list):
-            raise InferenceGatewayError("Inference service payload field 'components' must be a list")
-
-        normalized: dict[str, Any] = {
-            "detected_type": payload["detected_type"],
-            "confidence": float(payload["confidence"]),
-            "suggested_width": float(payload["suggested_width"]),
-            "suggested_height": float(payload["suggested_height"]),
-            "suggested_depth": float(payload["suggested_depth"]),
-            "components": components,
-            "image_url": payload["image_url"],
-        }
-
-        passthrough_fields = (
-            "interior",
-            "door",
-            "uncertainty",
-            "joints",
-            "hardware",
-        )
-        for field in passthrough_fields:
-            if field in payload:
-                normalized[field] = payload[field]
-
-        image_results = payload.get("image_results")
-        if image_results is not None and not isinstance(image_results, list):
-            raise InferenceGatewayError("Inference service payload field 'image_results' must be a list when present")
-
-        if image_results is not None:
-            normalized["image_results"] = image_results
-
-        images_analyzed = payload.get("images_analyzed")
-        if images_analyzed is not None:
-            normalized["images_analyzed"] = int(images_analyzed)
-
-        return normalized
-
-    def infer_many(self, image_urls: list[str]) -> dict[str, Any]:
-        payload = self._post_infer({"image_urls": image_urls})
-        return self._normalize_result(payload)
-
-    def submit(self, image_urls: list[str]) -> tuple[str, dict[str, Any]]:
+    def submit(self, image_urls: list[str]) -> tuple[str, InferenceOutput]:
         result = self.infer_many(image_urls)
         return str(uuid.uuid4()), result
 

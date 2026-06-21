@@ -54,15 +54,38 @@ class ProjectRuleValidator:
 
     def _validate_model_references(self, model: ProjectDesign, errors: list[str]) -> None:
         component_ids = {component.id for component in model.components}
+        face_ids = {
+            face.id
+            for component in model.components
+            for face in getattr(component, "faces", [])
+        }
+        seen_joint_ids: set[str] = set()
+
+        for component in model.components:
+            for face in getattr(component, "faces", []):
+                try:
+                    uuid.UUID(face.id.split(":")[-1])
+                except (ValueError, TypeError, AttributeError):
+                    errors.append(f"Face '{face.id}' must include a UUID segment.")
 
         for joint in model.joints:
-            if joint.parent_id not in component_ids:
+            if joint.id in seen_joint_ids:
+                errors.append(f"Duplicate joint id '{joint.id}' detected.")
+            else:
+                seen_joint_ids.add(joint.id)
+
+            try:
+                uuid.UUID(joint.id)
+            except (ValueError, TypeError, AttributeError):
+                errors.append(f"Joint '{joint.id}' must use UUID format.")
+
+            if joint.parent_face_id not in face_ids:
                 errors.append(
-                    f"Joint references unknown parent component id '{joint.parent_id}'."
+                    f"Joint references unknown parent face id '{joint.parent_face_id}'."
                 )
-            if joint.child_id not in component_ids:
+            if joint.child_face_id not in face_ids:
                 errors.append(
-                    f"Joint references unknown child component id '{joint.child_id}'."
+                    f"Joint references unknown child face id '{joint.child_face_id}'."
                 )
 
         for feature in model.features:

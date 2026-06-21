@@ -1,23 +1,81 @@
 from __future__ import annotations
 
-import math
 import uuid
 from collections.abc import Iterable
+from importlib import import_module
 
 from app.presentation.schemas.project_design import (
     Component,
     ComponentCategory,
     ComponentKind,
+    FaceSpec,
     FeatureSpec,
     HardwareAnchor,
     HardwareItem,
     HardwareMountFace,
     HardwareMountTarget,
+    JointRule,
     JointSpec,
     MaterialSpec,
     ProductSpec,
     ProjectModel,
 )
+from app.presentation.schemas.inference import InferenceOutput
+
+
+def _assign_component_transforms(product: ProductSpec, components: list[Component], joints: list[JointSpec]) -> None:
+    module = import_module("app.domain.services.component_transformer")
+    module.assign_component_transforms(product=product, components=components, joints=joints)
+
+
+FACE_ORDER: tuple[HardwareMountFace, ...] = (
+    HardwareMountFace.POS_X,
+    HardwareMountFace.NEG_X,
+    HardwareMountFace.POS_Y,
+    HardwareMountFace.NEG_Y,
+    HardwareMountFace.POS_Z,
+    HardwareMountFace.NEG_Z,
+)
+
+
+def _face_id(component_id: str, face: HardwareMountFace) -> str:
+    return f"{component_id}:{face.value}:{uuid.uuid4()}"
+
+
+def _component_id_from_face_id(face_id: str) -> str:
+    return face_id.split(":", 1)[0]
+
+
+def _face_from_id(face_id: str) -> HardwareMountFace | None:
+    try:
+        return HardwareMountFace(face_id.split(":")[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _set_component_faces(components: list[Component]) -> None:
+    for component in components:
+        component.faces = [
+            FaceSpec(id=_face_id(component.id, face), component_id=component.id, normal=face)
+            for face in FACE_ORDER
+        ]
+
+
+def _ensure_full_component_faces(components: list[Component]) -> None:
+    for component in components:
+        existing_normals = {face.normal for face in component.faces}
+        for normal in FACE_ORDER:
+            if normal in existing_normals:
+                continue
+            component.faces.append(FaceSpec(id=_face_id(component.id, normal), component_id=component.id, normal=normal))
+
+
+def _face_index(components: list[Component]) -> dict[tuple[str, HardwareMountFace], str]:
+    return {
+        (component.id, face.normal): face.id
+        for component in components
+        for face in component.faces
+    }
 
 
 def _safe_float(value: object, default: float) -> float:
@@ -62,9 +120,15 @@ def _infer_type_from_components(components: list[dict]) -> str | None:
         for component in components
         if isinstance(component, dict)
     }
-    if any(name in {"desktop", "front_apron", "table_top", "desk_frame"} for name in names):
+    has_door_or_drawer = any("door" in name for name in names) or any("drawer" in name for name in names)
+    has_storage_frame = any(name in {"side_panel", "back_panel", "bottom_panel", "top_panel"} for name in names)
+    has_desk_surface = any(name in {"desktop", "table_top", "desk_frame"} for name in names)
+    has_leg = any("leg" in name for name in names)
+
+    # front_apron alone is ambiguous; require a stronger desk cue.
+    if has_desk_surface or ("front_apron" in names and has_leg):
         return "desk"
-    if any("door" in name for name in names) or any("drawer" in name for name in names):
+    if has_door_or_drawer or has_storage_frame:
         return "cabinet"
     if "shelf_panel" in names and not any("door" in name for name in names):
         return "shelf"
@@ -178,7 +242,11 @@ def _extend_validation_warnings(
         warnings.append("Validation: no joints were generated; assembly placement may be unreliable")
         return
 
-    child_ids_with_joints = {joint.child_id for joint in joints}
+    linked_component_ids = {
+        _component_id_from_face_id(joint.parent_face_id) for joint in joints
+    } | {
+        _component_id_from_face_id(joint.child_face_id) for joint in joints
+    }
     critical_kinds = {
         ComponentKind.LEFT_SIDE,
         ComponentKind.RIGHT_SIDE,
@@ -188,9 +256,7 @@ def _extend_validation_warnings(
         ComponentKind.DIVIDER_PANEL,
     }
     critical_components = [component for component in components if component.kind in critical_kinds]
-    unanchored_critical = [
-        component for component in critical_components if component.id not in child_ids_with_joints
-    ]
+    unanchored_critical = [component for component in critical_components if component.id not in linked_component_ids]
     if unanchored_critical:
         warnings.append(
             "Validation: some structural components have no joint placement ("
@@ -199,7 +265,7 @@ def _extend_validation_warnings(
 
     drawer_ids = {component.id for component in components if component.kind == ComponentKind.DRAWER_FRONT}
     if drawer_ids:
-        anchored_drawers = len([component_id for component_id in drawer_ids if component_id in child_ids_with_joints])
+        anchored_drawers = len([component_id for component_id in drawer_ids if component_id in linked_component_ids])
         if anchored_drawers < max(1, len(drawer_ids) // 2):
             warnings.append(
                 "Validation: most drawer components are not anchored by joints "
@@ -209,35 +275,178 @@ def _extend_validation_warnings(
 
 def _joint_pose_magnitude(joint: JointSpec) -> float:
     return (
-        abs(joint.pos_x)
-        + abs(joint.pos_y)
-        + abs(joint.pos_z)
-        + abs(joint.rot_x)
-        + abs(joint.rot_y)
-        + abs(joint.rot_z)
+        abs(joint.offset_u)
+        + abs(joint.offset_v)
+        + abs(joint.clearance)
     )
 
 
-def _normalize_joints(joints: list[JointSpec], valid_component_ids: set[str]) -> list[JointSpec]:
+def _face_normal(face: HardwareMountFace) -> tuple[int, int, int]:
+    if face == HardwareMountFace.POS_X:
+        return (1, 0, 0)
+    if face == HardwareMountFace.NEG_X:
+        return (-1, 0, 0)
+    if face == HardwareMountFace.POS_Y:
+        return (0, 1, 0)
+    if face == HardwareMountFace.NEG_Y:
+        return (0, -1, 0)
+    if face == HardwareMountFace.POS_Z:
+        return (0, 0, 1)
+    return (0, 0, -1)
+
+
+def _faces_are_opposed(parent_face: HardwareMountFace, child_face: HardwareMountFace) -> bool:
+    px, py, pz = _face_normal(parent_face)
+    cx, cy, cz = _face_normal(child_face)
+    return (px + cx, py + cy, pz + cz) == (0, 0, 0)
+
+
+def _faces_match_axis(face_a: HardwareMountFace, face_b: HardwareMountFace, axis: str) -> bool:
+    if axis == "x":
+        return {face_a, face_b} == {HardwareMountFace.POS_X, HardwareMountFace.NEG_X}
+    if axis == "y":
+        return {face_a, face_b} == {HardwareMountFace.POS_Y, HardwareMountFace.NEG_Y}
+    return {face_a, face_b} == {HardwareMountFace.POS_Z, HardwareMountFace.NEG_Z}
+
+
+def _joint_faces_compatible(
+    parent_kind: ComponentKind,
+    child_kind: ComponentKind,
+    parent_face: HardwareMountFace,
+    child_face: HardwareMountFace,
+) -> bool:
+    pair = {parent_kind, child_kind}
+
+    side_like = {ComponentKind.LEFT_SIDE, ComponentKind.RIGHT_SIDE, ComponentKind.DIVIDER_PANEL}
+    top_bottom = {ComponentKind.TOP_PANEL, ComponentKind.BOTTOM_PANEL}
+    front_like = {ComponentKind.FRONT_PANEL, ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT}
+
+    if pair & side_like and pair & top_bottom:
+        return _faces_match_axis(parent_face, child_face, "y")
+
+    if ComponentKind.BACK_PANEL in pair and (pair & side_like or pair & top_bottom):
+        return _faces_match_axis(parent_face, child_face, "z")
+
+    if pair & front_like and (pair & side_like or pair & {ComponentKind.DIVIDER_PANEL, ComponentKind.BACK_PANEL}):
+        return _faces_match_axis(parent_face, child_face, "z")
+
+    return True
+
+
+def _normalize_joints(joints: list[JointSpec], component_by_id: dict[str, Component]) -> list[JointSpec]:
     # Drop broken links first.
     filtered: list[JointSpec] = []
+    valid_component_ids = set(component_by_id)
     for joint in joints:
-        if joint.parent_id not in valid_component_ids or joint.child_id not in valid_component_ids:
+        parent_id = _component_id_from_face_id(joint.parent_face_id)
+        child_id = _component_id_from_face_id(joint.child_face_id)
+        if parent_id not in valid_component_ids or child_id not in valid_component_ids:
             continue
-        if joint.parent_id == joint.child_id:
+        if parent_id == child_id:
+            continue
+        parent_face = _face_from_id(joint.parent_face_id)
+        child_face = _face_from_id(joint.child_face_id)
+        if parent_face is None or child_face is None:
+            continue
+        if not _faces_are_opposed(parent_face, child_face):
+            continue
+        parent_component = component_by_id.get(parent_id)
+        child_component = component_by_id.get(child_id)
+        if parent_component is None or child_component is None:
+            continue
+        if not _joint_faces_compatible(parent_component.kind, child_component.kind, parent_face, child_face):
             continue
         filtered.append(joint)
 
-    # Remove duplicate constraints between the same pair by keeping the stronger
-    # (non-zero pose) joint.
+    # Remove duplicate constraints between the same pair of faces.
     by_pair: dict[tuple[str, str], JointSpec] = {}
     for joint in filtered:
-        pair_key = tuple(sorted((joint.parent_id, joint.child_id)))
+        pair_key = tuple(sorted((joint.parent_face_id, joint.child_face_id)))
         existing = by_pair.get(pair_key)
         if existing is None or _joint_pose_magnitude(joint) > _joint_pose_magnitude(existing):
             by_pair[pair_key] = joint
 
     return list(by_pair.values())
+
+
+def _ensure_minimum_connectivity_joints(components: list[Component], joints: list[JointSpec]) -> list[JointSpec]:
+    face_index = _face_index(components)
+    by_id = {component.id: component for component in components}
+
+    side_supports = [
+        component
+        for component in components
+        if component.kind in {ComponentKind.LEFT_SIDE, ComponentKind.RIGHT_SIDE, ComponentKind.DIVIDER_PANEL}
+    ]
+    tops = [component for component in components if component.kind == ComponentKind.TOP_PANEL]
+    bottoms = [component for component in components if component.kind == ComponentKind.BOTTOM_PANEL]
+    backs = [component for component in components if component.kind == ComponentKind.BACK_PANEL]
+    drawers = [component for component in components if component.kind == ComponentKind.DRAWER_FRONT]
+    front_like = [
+        component
+        for component in components
+        if component.kind in {ComponentKind.FRONT_PANEL, ComponentKind.DOOR_PANEL}
+    ]
+
+    existing_pairs = {
+        tuple(sorted((joint.parent_face_id, joint.child_face_id)))
+        for joint in joints
+    }
+
+    def add_joint(
+        parent: Component,
+        child: Component,
+        parent_face: HardwareMountFace,
+        child_face: HardwareMountFace,
+        rule: JointRule,
+    ) -> None:
+        parent_face_id = face_index.get((parent.id, parent_face))
+        child_face_id = face_index.get((child.id, child_face))
+        if parent_face_id is None or child_face_id is None:
+            return
+
+        pair_key = tuple(sorted((parent_face_id, child_face_id)))
+        if pair_key in existing_pairs:
+            return
+
+        joints.append(
+            JointSpec(
+                id=str(uuid.uuid4()),
+                parent_face_id=parent_face_id,
+                child_face_id=child_face_id,
+                joint_rule=rule,
+                offset_u=0.0,
+                offset_v=0.0,
+                clearance=0.0,
+            )
+        )
+        existing_pairs.add(pair_key)
+
+    # Structural frame: supports to top/bottom using vertical contact faces.
+    for support in side_supports:
+        for top in tops:
+            add_joint(support, top, HardwareMountFace.POS_Y, HardwareMountFace.NEG_Y, JointRule.OVERLAP)
+        for bottom in bottoms:
+            add_joint(support, bottom, HardwareMountFace.NEG_Y, HardwareMountFace.POS_Y, JointRule.OVERLAP)
+
+    # Back panel should be anchored to carcass supports.
+    back_supports = side_supports or tops or bottoms
+    if back_supports:
+        for back in backs:
+            for support in back_supports[:4]:
+                add_joint(support, back, HardwareMountFace.POS_Z, HardwareMountFace.NEG_Z, JointRule.FLUSH_BACK)
+
+    # Front parts should be anchored to any available support.
+    supports_for_front = side_supports or tops or bottoms
+    if supports_for_front:
+        base_support = supports_for_front[0]
+        for drawer in drawers:
+            add_joint(base_support, drawer, HardwareMountFace.POS_Z, HardwareMountFace.NEG_Z, JointRule.BETWEEN)
+        for front in front_like:
+            add_joint(base_support, front, HardwareMountFace.POS_Z, HardwareMountFace.NEG_Z, JointRule.MOUNT)
+
+    # Keep only joints that still reference existing components/faces.
+    return _normalize_joints(joints, by_id)
 
 
 def _category_for_kind(kind: ComponentKind) -> ComponentCategory:
@@ -257,137 +466,291 @@ def _category_for_kind(kind: ComponentKind) -> ComponentCategory:
     return ComponentCategory.SUPPORT
 
 
+def _is_front_like_kind(kind: ComponentKind) -> bool:
+    return kind in {ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT, ComponentKind.FRONT_PANEL}
+
+
+def _preferred_hardware_targets(code: str, components: list[Component]) -> list[Component]:
+    upper = code.upper()
+    doors = [component for component in components if component.kind == ComponentKind.DOOR_PANEL]
+    drawers = [component for component in components if component.kind == ComponentKind.DRAWER_FRONT]
+    fronts = [component for component in components if component.kind == ComponentKind.FRONT_PANEL]
+    front_like = [component for component in components if _is_front_like_kind(component.kind)]
+
+    if "HINGE" in upper and doors:
+        return doors
+    if ("SLIDE" in upper or "TRACK" in upper or "RAIL" in upper) and drawers:
+        return drawers
+    if "CAM_LOCK" in upper and (drawers or doors):
+        return drawers or doors
+    if front_like:
+        return front_like
+    return []
+
+
+def _synthesize_mount_targets(code: str, qty: int, components: list[Component]) -> list[HardwareMountTarget]:
+    target_components = _preferred_hardware_targets(code, components)
+    if not target_components:
+        return []
+
+    upper = code.upper()
+
+    def offset_for(
+        component: Component,
+        *,
+        component_idx: int,
+        local_idx: int,
+    ) -> tuple[float, float, float]:
+        width = max(component.width, 1.0)
+        height = max(component.height, 1.0)
+        depth = max(component.depth, 1.0)
+
+        x_inset = _clamp(width * 0.38, 10.0, 85.0)
+        y_inset = _clamp(height * 0.35, 16.0, 220.0)
+        z_local = round(depth * 0.5, 3)
+
+        if "HINGE" in upper:
+            side = -1.0 if component_idx % 2 == 0 else 1.0
+            y_slots = [-y_inset, y_inset, 0.0]
+            return (round(side * x_inset, 3), round(y_slots[local_idx % len(y_slots)], 3), z_local)
+
+        if "CAM_LOCK" in upper:
+            corners = [
+                (-x_inset, -y_inset),
+                (x_inset, -y_inset),
+                (-x_inset, y_inset),
+                (x_inset, y_inset),
+            ]
+            x, y = corners[local_idx % len(corners)]
+            return (round(x, 3), round(y, 3), z_local)
+
+        if "SCREW" in upper or "BOLT" in upper:
+            perimeter = [
+                (-x_inset, -y_inset),
+                (0.0, -y_inset),
+                (x_inset, -y_inset),
+                (-x_inset, 0.0),
+                (x_inset, 0.0),
+                (-x_inset, y_inset),
+                (0.0, y_inset),
+                (x_inset, y_inset),
+            ]
+            x, y = perimeter[local_idx % len(perimeter)]
+            return (round(x, 3), round(y, 3), z_local)
+
+        # Generic fallback keeps broad spacing.
+        broad = [
+            (-x_inset, -y_inset),
+            (x_inset, -y_inset),
+            (-x_inset, y_inset),
+            (x_inset, y_inset),
+            (0.0, 0.0),
+        ]
+        x, y = broad[local_idx % len(broad)]
+        return (round(x, 3), round(y, 3), z_local)
+
+    targets: list[HardwareMountTarget] = []
+    for idx in range(max(qty, 0)):
+        component_idx = idx % len(target_components)
+        component = target_components[component_idx]
+        local_x, local_y, local_z = offset_for(component, component_idx=component_idx, local_idx=idx // len(target_components))
+
+        targets.append(
+            HardwareMountTarget(
+                component_id=component.id,
+                face=HardwareMountFace.POS_Z,
+                local_x=local_x,
+                local_y=local_y,
+                local_z=local_z,
+                normal_offset_mm=2.0,
+            )
+        )
+
+    return targets
+
+
+def _normalize_inferred_type_from_mapped_components(
+    inferred_type: str,
+    components: list[Component],
+) -> str:
+    if inferred_type != "desk":
+        return inferred_type
+
+    kinds = {component.kind for component in components}
+    has_leg = any(
+        kind in {
+            ComponentKind.LEFT_LEG_FRONT,
+            ComponentKind.RIGHT_LEG_FRONT,
+            ComponentKind.LEFT_LEG_BACK,
+            ComponentKind.RIGHT_LEG_BACK,
+        }
+        for kind in kinds
+    )
+    has_storage_carcass = (
+        ComponentKind.LEFT_SIDE in kinds
+        and ComponentKind.RIGHT_SIDE in kinds
+        and (ComponentKind.TOP_PANEL in kinds or ComponentKind.BOTTOM_PANEL in kinds)
+        and (ComponentKind.BACK_PANEL in kinds or ComponentKind.DIVIDER_PANEL in kinds)
+    )
+    has_storage_front = any(kind in {ComponentKind.DOOR_PANEL, ComponentKind.DRAWER_FRONT, ComponentKind.FRONT_PANEL} for kind in kinds)
+
+    if not has_leg and (has_storage_carcass or has_storage_front):
+        return "cabinet"
+    return inferred_type
+
+
+def _ensure_side_support_pair(
+    components: list[Component],
+    *,
+    inferred_type: str,
+    target_height: float,
+    target_depth: float,
+    material_thickness: float,
+) -> None:
+    if inferred_type not in {"cabinet", "desk"}:
+        return
+
+    if len(components) < 4:
+        return
+
+    has_front_or_internal_signal = any(
+        component.kind in {
+            ComponentKind.DIVIDER_PANEL,
+            ComponentKind.DRAWER_FRONT,
+            ComponentKind.DOOR_PANEL,
+            ComponentKind.FRONT_PANEL,
+            ComponentKind.SHELF,
+            ComponentKind.BACK_PANEL,
+            ComponentKind.TOP_PANEL,
+            ComponentKind.BOTTOM_PANEL,
+        }
+        for component in components
+    )
+    if not has_front_or_internal_signal:
+        return
+
+    left = [component for component in components if component.kind == ComponentKind.LEFT_SIDE]
+    right = [component for component in components if component.kind == ComponentKind.RIGHT_SIDE]
+    if left and right:
+        return
+
+    template = (left or right or [
+        component for component in components if component.kind == ComponentKind.DIVIDER_PANEL
+    ])
+    sample = template[0] if template else None
+
+    width = max(sample.width, material_thickness) if sample is not None else material_thickness
+    height = max(sample.height, target_height * 0.92) if sample is not None else target_height * 0.92
+    depth = max(sample.depth, target_depth * 0.92) if sample is not None else target_depth * 0.92
+
+    def create_side(kind: ComponentKind) -> Component:
+        side = Component(
+            id=str(uuid.uuid4()),
+            kind=kind,
+            category=ComponentCategory.STRUCTURAL,
+            material_id="material_board_default",
+            width=round(width, 2),
+            height=round(height, 2),
+            depth=round(depth, 2),
+        )
+        _set_component_faces([side])
+        return side
+
+    if not left:
+        components.append(create_side(ComponentKind.LEFT_SIDE))
+    if not right:
+        components.append(create_side(ComponentKind.RIGHT_SIDE))
+
+
 def build_project_model_from_inference(
-    result: dict,
+    inference: InferenceOutput,
     *,
     project_name: str,
     fallback_type: str = "cabinet",
     material_thickness: float = 18.0,
 ) -> ProjectModel:
-    source_components = list(_as_iterable(result.get("components")))
-    component_type = _infer_type_from_components(source_components)
-    if component_type is not None:
-        inferred_type = component_type
-    else:
-        inferred_type = _normalize_type(result.get("detected_type"), fallback=fallback_type)
-    target_width = max(_safe_float(result.get("suggested_width"), 800.0), 1.0)
-    target_height = max(_safe_float(result.get("suggested_height"), 1200.0), 1.0)
-    target_depth = max(_safe_float(result.get("suggested_depth"), 450.0), 1.0)
+    source_components = [component.model_dump(mode="json") for component in inference.components]
+    source_faces = [face.model_dump(mode="json") for face in inference.faces]
+    source_joints = [joint.model_dump(mode="json") for joint in inference.joints]
+    if not source_components:
+        raise ValueError("Inference payload must include non-empty 'components'")
+    if not source_faces:
+        raise ValueError("Inference payload must include non-empty 'faces'")
+    if not source_joints:
+        raise ValueError("Inference payload must include non-empty 'joints'")
 
-    image_w_px, image_h_px = _extract_image_size(result)
+    inferred_type = _normalize_type(inference.detected_type, fallback=fallback_type)
+    target_width = max(float(inference.suggested_width), 1.0)
+    target_height = max(float(inference.suggested_height), 1.0)
+    target_depth = max(float(inference.suggested_depth), 1.0)
 
     components: list[Component] = []
-    component_id_map: dict[str, list[str]] = {}
-    component_name_map: dict[str, list[str]] = {}
+    component_by_id: dict[str, Component] = {}
+    for entry in source_components:
+        component_id = str(entry.get("id", "")).strip()
+        if not component_id:
+            raise ValueError("Inference component is missing 'id'")
+        try:
+            kind = ComponentKind(str(entry.get("kind", "")).strip().lower())
+        except ValueError as exc:
+            raise ValueError(f"Inference component '{component_id}' has invalid kind") from exc
 
-    side_index = 0
-    leg_index = 0
-    skipped_names: list[str] = []
-    product_container_names = {
-        "cabinet_body",
-        "bookcase_body",
-        "desk_frame",
-        "nightstand_body",
-        "dresser_body",
-        "sideboard_body",
-        "tv_stand_body",
-        "drawer_box",
-    }
+        width = _safe_float(entry.get("width"), -1.0)
+        height = _safe_float(entry.get("height"), -1.0)
+        depth = _safe_float(entry.get("depth"), -1.0)
+        if width <= 0 or height <= 0 or depth <= 0:
+            raise ValueError(f"Inference component '{component_id}' must include positive width/height/depth")
 
-    def map_kind(name: str) -> ComponentKind | None:
-        nonlocal side_index, leg_index
-        if name in {"top_panel", "desktop", "table_top"}:
-            return ComponentKind.TOP_PANEL
-        if name == "bottom_panel":
-            return ComponentKind.BOTTOM_PANEL
-        if name == "back_panel":
-            return ComponentKind.BACK_PANEL
-        if name in {"front_panel", "front_apron"}:
-            return ComponentKind.FRONT_PANEL
-        if name in {"shelf", "shelf_panel"}:
-            return ComponentKind.SHELF
-        if name == "divider_panel":
-            return ComponentKind.DIVIDER_PANEL
-        if name == "door_panel":
-            return ComponentKind.DOOR_PANEL
-        if name == "drawer_front":
-            return ComponentKind.DRAWER_FRONT
-        if name == "side_panel":
-            kind = ComponentKind.LEFT_SIDE if side_index % 2 == 0 else ComponentKind.RIGHT_SIDE
-            side_index += 1
-            return kind
-        if name == "leg":
-            cycle = (
-                ComponentKind.LEFT_LEG_FRONT,
-                ComponentKind.RIGHT_LEG_FRONT,
-                ComponentKind.LEFT_LEG_BACK,
-                ComponentKind.RIGHT_LEG_BACK,
-            )
-            kind = cycle[leg_index % len(cycle)]
-            leg_index += 1
-            return kind
-        return None
+        component = Component(
+            id=component_id,
+            kind=kind,
+            category=_category_for_kind(kind),
+            material_id=str(entry.get("material_id") or "material_board_default"),
+            width=width,
+            height=height,
+            depth=depth,
+        )
+        components.append(component)
+        component_by_id[component.id] = component
 
-    for idx, comp in enumerate(source_components):
-        name = str(comp.get("name", "")).strip().lower()
-        if not name:
-            continue
+    face_ids: set[str] = set()
+    for entry in source_faces:
+        face_id = str(entry.get("id", "")).strip()
+        component_id = str(entry.get("component_id", "")).strip()
+        normal_raw = str(entry.get("normal", "")).strip().lower()
+        if not face_id or not component_id or not normal_raw:
+            raise ValueError("Inference face must include id, component_id and normal")
+        component = component_by_id.get(component_id)
+        if component is None:
+            raise ValueError(f"Inference face '{face_id}' references unknown component '{component_id}'")
+        try:
+            normal = HardwareMountFace(normal_raw)
+        except ValueError as exc:
+            raise ValueError(f"Inference face '{face_id}' has invalid normal '{normal_raw}'") from exc
+        component.faces.append(FaceSpec(id=face_id, component_id=component_id, normal=normal))
+        face_ids.add(face_id)
 
-        quantity = max(_safe_int(comp.get("quantity"), 1), 1)
+    if any(not component.faces for component in components):
+        raise ValueError("Each inferred component must include at least one face")
 
-        base_source_id = str(comp.get("id", f"cv_{name}_{idx + 1}"))
-        mapped_any = False
-        for q in range(quantity):
-            kind = map_kind(name)
-            if kind is None:
-                break
+    _ensure_full_component_faces(components)
 
-            width_mm, height_mm, depth_mm = _component_size_mm(
-                comp,
-                kind=kind,
-                image_w_px=image_w_px,
-                image_h_px=image_h_px,
-                target_w_mm=target_width,
-                target_h_mm=target_height,
-                target_d_mm=target_depth,
-                material_thickness=material_thickness,
-            )
-
-            comp_id = str(uuid.uuid4())
-            component_id_map.setdefault(base_source_id, []).append(comp_id)
-            component_name_map.setdefault(name, []).append(comp_id)
-            mapped_any = True
-            components.append(
-                Component(
-                    id=comp_id,
-                    kind=kind,
-                    category=_category_for_kind(kind),
-                    material_id="material_board_default",
-                    width=width_mm,
-                    height=height_mm,
-                    depth=depth_mm,
-                )
-            )
-
-        if not mapped_any and name not in product_container_names:
-            skipped_names.append(name)
-
-    door_count = sum(max(_safe_int(c.get("quantity"), 1), 1) for c in source_components if str(c.get("name", "")).strip().lower() == "door_panel")
-    drawer_front_count = sum(
-        max(_safe_int(c.get("quantity"), 1), 1)
-        for c in source_components
-        if str(c.get("name", "")).strip().lower() == "drawer_front"
+    _ensure_side_support_pair(
+        components,
+        inferred_type=inferred_type,
+        target_height=target_height,
+        target_depth=target_depth,
+        material_thickness=material_thickness,
     )
-    drawer_box_count = sum(
-        max(_safe_int(c.get("quantity"), 1), 1)
-        for c in source_components
-        if str(c.get("name", "")).strip().lower() == "drawer_box"
-    )
-    drawer_count = drawer_front_count if drawer_front_count > 0 else drawer_box_count
+
+    face_ids = {face.id for component in components for face in component.faces}
+
+    door_count = sum(1 for component in components if component.kind == ComponentKind.DOOR_PANEL)
+    drawer_count = sum(1 for component in components if component.kind == ComponentKind.DRAWER_FRONT)
     if inferred_type == "desk":
         drawer_count = min(drawer_count, 4)
-    shelf_count = sum(max(_safe_int(c.get("quantity"), 1), 1) for c in source_components if str(c.get("name", "")).strip().lower() in {"shelf", "shelf_panel"})
-    divider_count = sum(max(_safe_int(c.get("quantity"), 1), 1) for c in source_components if str(c.get("name", "")).strip().lower() == "divider_panel")
+    shelf_count = sum(1 for component in components if component.kind == ComponentKind.SHELF)
+    divider_count = sum(1 for component in components if component.kind == ComponentKind.DIVIDER_PANEL)
 
     product = ProductSpec(
         id=str(uuid.uuid4()),
@@ -413,11 +776,11 @@ def build_project_model_from_inference(
     ]
 
     hardware: list[HardwareItem] = []
-    for entry in _as_iterable(result.get("hardware")):
-        code = str(entry.get("code", "")).strip()
+    for hardware_entry in inference.hardware or []:
+        code = str(hardware_entry.code).strip()
         if not code:
             continue
-        qty = max(_safe_int(entry.get("qty"), 1), 1)
+        qty = max(int(hardware_entry.qty), 1)
         anchor = None
         try:
             anchor = HardwareAnchor(code)
@@ -433,7 +796,7 @@ def build_project_model_from_inference(
             "+z": HardwareMountFace.POS_Z,
             "-z": HardwareMountFace.NEG_Z,
         }
-        for target in _as_iterable(entry.get("mount_targets")):
+        for target in _as_iterable((hardware_entry.model_dump(mode="json")).get("mount_targets")):
             if not isinstance(target, dict):
                 continue
             component_id = str(target.get("component_id", "")).strip()
@@ -454,334 +817,56 @@ def build_project_model_from_inference(
                 )
             )
 
+        if not mount_targets:
+            mount_targets = _synthesize_mount_targets(code, qty, components)
+
         lower = code.lower()
         hardware.append(
             HardwareItem(
                 code=code,
                 qty=qty,
-                id=str(entry.get("id", f"hardware_{lower}")),
+                id=f"hardware_{lower}",
                 anchor=anchor,
-                mesh_path=entry.get("mesh_path"),
-                svg_path=entry.get("svg_path"),
+                mesh_path=None,
+                svg_path=None,
                 mount_targets=mount_targets,
             )
         )
 
-    inference_joints: list[JointSpec] = []
-    seen_joint_pairs: set[tuple[str, str]] = set()
-    for entry in _as_iterable(result.get("joints")):
-        parent_source = str(entry.get("parent_component_id", "")).strip()
-        child_source = str(entry.get("child_component_id", "")).strip()
-        if not parent_source or not child_source:
-            continue
+    joints: list[JointSpec] = []
+    for entry in source_joints:
+        joint_id = str(entry.get("id", "")).strip()
+        parent_face_id = str(entry.get("parent_face_id", "")).strip()
+        child_face_id = str(entry.get("child_face_id", "")).strip()
+        if not joint_id or not parent_face_id or not child_face_id:
+            raise ValueError("Inference joint must include id, parent_face_id and child_face_id")
+        if parent_face_id not in face_ids or child_face_id not in face_ids:
+            raise ValueError(f"Inference joint '{joint_id}' references unknown faces")
 
-        parent_ids = component_id_map.get(parent_source)
-        child_ids = component_id_map.get(child_source)
-        if parent_ids is None:
-            parent_ids = component_name_map.get(parent_source.lower())
-        if child_ids is None:
-            child_ids = component_name_map.get(child_source.lower())
+        joint_rule = entry.get("joint_rule")
+        parsed_rule = None
+        if isinstance(joint_rule, str) and joint_rule.strip():
+            try:
+                parsed_rule = JointRule(joint_rule.strip().lower())
+            except ValueError as exc:
+                raise ValueError(f"Inference joint '{joint_id}' has invalid joint_rule") from exc
 
-        if not parent_ids or not child_ids:
-            continue
-
-        inferred_count = max(_safe_int(entry.get("count"), 1), 1)
-        if len(child_ids) > 1:
-            joint_target = max(len(child_ids), min(inferred_count, len(child_ids)))
-        else:
-            joint_target = max(1, min(inferred_count, len(parent_ids)))
-
-        for idx in range(joint_target):
-            parent_id = parent_ids[idx % len(parent_ids)]
-            child_id = child_ids[idx % len(child_ids)]
-            pair = (parent_id, child_id)
-            if pair in seen_joint_pairs:
-                continue
-            seen_joint_pairs.add(pair)
-            inference_joints.append(
-                JointSpec(
-                    parent_id=parent_id,
-                    child_id=child_id,
-                    joint_rule=None,
-                    pos_x=0.0,
-                    pos_y=0.0,
-                    pos_z=0.0,
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
-                )
+        joints.append(
+            JointSpec(
+                id=joint_id,
+                parent_face_id=parent_face_id,
+                child_face_id=child_face_id,
+                joint_rule=parsed_rule,
+                offset_u=_safe_float(entry.get("offset_u"), 0.0),
+                offset_v=_safe_float(entry.get("offset_v"), 0.0),
+                clearance=max(_safe_float(entry.get("clearance"), 0.0), 0.0),
             )
-
-    joints: list[JointSpec] = list(inference_joints)
-
-    # If CV did not return spatial joints for desks, place common supports and
-    # drawer fronts in a stable two-pedestal layout to avoid origin-stacked parts.
-    weak_inference_joints = (
-        len(inference_joints) <= 2
-        and all(_joint_pose_magnitude(joint) == 0.0 for joint in inference_joints)
-    )
-    if inferred_type == "desk" and (len(joints) <= 1 or weak_inference_joints):
-        # Ignore weak zero-pose joints so they don't conflict with desk fallback.
-        joints = []
-        top = next((component for component in components if component.kind == ComponentKind.TOP_PANEL), None)
-        left_side = next((component for component in components if component.kind == ComponentKind.LEFT_SIDE), None)
-        right_side = next((component for component in components if component.kind == ComponentKind.RIGHT_SIDE), None)
-        divider = next((component for component in components if component.kind == ComponentKind.DIVIDER_PANEL), None)
-        drawer_fronts = [component for component in components if component.kind == ComponentKind.DRAWER_FRONT]
-
-        # Pedestal mode is enabled when desk has side supports and drawers.
-        pedestal_mode = (
-            top is not None
-            and left_side is not None
-            and right_side is not None
-            and len(drawer_fronts) >= 4
         )
 
-        if pedestal_mode and top is not None and left_side is not None and right_side is not None:
-            top_thickness = max(top.height, material_thickness)
-            support_height = _clamp(
-                target_height - top_thickness - material_thickness,
-                target_height * 0.60,
-                target_height * 0.94,
-            )
-            pedestal_depth = _clamp(target_depth * 0.86, target_depth * 0.68, target_depth - material_thickness)
-
-            max_drawer_face_w = max((drawer.width for drawer in drawer_fronts), default=target_width * 0.18)
-            pedestal_width = _clamp(
-                max(max_drawer_face_w * 1.18, target_width * 0.20),
-                target_width * 0.20,
-                target_width * 0.30,
-            )
-
-            half_width = target_width / 2.0
-            lateral_clearance = max(material_thickness * 2.0, target_width * 0.04)
-            max_center_offset = half_width - (pedestal_width / 2.0) - lateral_clearance
-            center_offset = _clamp(target_width * 0.34, material_thickness * 3.0, max_center_offset)
-
-            # Align side supports with pedestal geometry.
-            left_side.width = round(material_thickness, 2)
-            left_side.height = round(support_height, 2)
-            left_side.depth = round(pedestal_depth, 2)
-            right_side.width = round(material_thickness, 2)
-            right_side.height = round(support_height, 2)
-            right_side.depth = round(pedestal_depth, 2)
-
-            # Ensure two explicit pedestal carcass volume blocks.
-            pedestal_block_height = round(_clamp(support_height * 0.94, support_height * 0.72, support_height), 2)
-            pedestal_block_width = round(pedestal_width, 2)
-            pedestal_block_depth = round(_clamp(pedestal_depth * 0.94, pedestal_depth * 0.72, pedestal_depth), 2)
-
-            existing_dividers = [component for component in components if component.kind == ComponentKind.DIVIDER_PANEL]
-            while len(existing_dividers) < 2:
-                block = Component(
-                    id=str(uuid.uuid4()),
-                    kind=ComponentKind.DIVIDER_PANEL,
-                    material_id="material_board_default",
-                    width=pedestal_block_width,
-                    height=pedestal_block_height,
-                    depth=pedestal_block_depth,
-                )
-                components.append(block)
-                existing_dividers.append(block)
-
-            left_pedestal_block = existing_dividers[0]
-            right_pedestal_block = existing_dividers[1]
-            for block in (left_pedestal_block, right_pedestal_block):
-                block.width = pedestal_block_width
-                block.height = pedestal_block_height
-                block.depth = pedestal_block_depth
-
-            support_center_y = round(-((target_height - top_thickness) / 2.0), 2)
-            block_center_y = round(support_center_y + (support_height - pedestal_block_height) / 2.0, 2)
-
-            joints.append(
-                JointSpec(
-                    parent_id=top.id,
-                    child_id=left_side.id,
-                    joint_rule=None,
-                    pos_x=round(-center_offset, 2),
-                    pos_y=support_center_y,
-                    pos_z=0.0,
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
-                )
-            )
-            joints.append(
-                JointSpec(
-                    parent_id=top.id,
-                    child_id=right_side.id,
-                    joint_rule=None,
-                    pos_x=round(center_offset, 2),
-                    pos_y=support_center_y,
-                    pos_z=0.0,
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
-                )
-            )
-            joints.append(
-                JointSpec(
-                    parent_id=top.id,
-                    child_id=left_pedestal_block.id,
-                    joint_rule=None,
-                    pos_x=round(-center_offset, 2),
-                    pos_y=block_center_y,
-                    pos_z=0.0,
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
-                )
-            )
-            joints.append(
-                JointSpec(
-                    parent_id=top.id,
-                    child_id=right_pedestal_block.id,
-                    joint_rule=None,
-                    pos_x=round(center_offset, 2),
-                    pos_y=block_center_y,
-                    pos_z=0.0,
-                    rot_x=0.0,
-                    rot_y=0.0,
-                    rot_z=0.0,
-                )
-            )
-
-            rows = max(1, math.ceil(len(drawer_fronts) / 2))
-            usable_height = max(support_height - (material_thickness * 3.0), material_thickness * 6.0)
-            drawer_slot_height = usable_height / rows
-            drawer_face_height = _clamp(drawer_slot_height * 0.82, material_thickness * 2.0, target_height * 0.22)
-            drawer_face_width = _clamp(pedestal_width * 0.82, material_thickness * 4.0, pedestal_width - material_thickness * 2.0)
-            drawer_depth = _clamp(pedestal_depth * 0.82, material_thickness * 2.0, pedestal_depth - material_thickness)
-
-            drawer_top_limit = support_center_y + (support_height / 2.0) - material_thickness
-            drawer_bottom_limit = support_center_y - (support_height / 2.0) + material_thickness
-            z_limit = (pedestal_depth / 2.0) - (drawer_depth / 2.0) - (material_thickness * 0.25)
-
-            for idx, drawer in enumerate(drawer_fronts):
-                col = idx % 2
-                row = idx // 2
-
-                drawer.width = round(drawer_face_width, 2)
-                drawer.height = round(drawer_face_height, 2)
-                drawer.depth = round(drawer_depth, 2)
-
-                x_pos = round((-center_offset) if col == 0 else center_offset, 2)
-                y_raw = drawer_top_limit - ((row + 0.5) * drawer_slot_height)
-                y_pos = round(_clamp(y_raw, drawer_bottom_limit, drawer_top_limit), 2)
-                z_pos = round(max(material_thickness, z_limit), 2)
-
-                joints.append(
-                    JointSpec(
-                        parent_id=top.id,
-                        child_id=drawer.id,
-                        joint_rule=None,
-                        pos_x=x_pos,
-                        pos_y=y_pos,
-                        pos_z=z_pos,
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-
-            # Optional center divider can stay, but keep it low-profile so it does not
-            # interpenetrate the drawer bay envelope.
-            if divider is not None:
-                divider.width = round(material_thickness, 2)
-                divider.height = round(_clamp(support_height * 0.82, support_height * 0.50, support_height), 2)
-                divider.depth = round(_clamp(pedestal_depth * 0.82, pedestal_depth * 0.55, pedestal_depth), 2)
-                joints.append(
-                    JointSpec(
-                        parent_id=top.id,
-                        child_id=divider.id,
-                        joint_rule=None,
-                        pos_x=0.0,
-                        pos_y=round(support_center_y + material_thickness, 2),
-                        pos_z=0.0,
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-
-        if not pedestal_mode and top is not None:
-            if left_side is not None:
-                joints.append(
-                    JointSpec(
-                        parent_id=top.id,
-                        child_id=left_side.id,
-                        joint_rule=None,
-                        pos_x=round(-target_width * 0.42, 2),
-                        pos_y=round(-target_height * 0.36, 2),
-                        pos_z=0.0,
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-            if right_side is not None:
-                joints.append(
-                    JointSpec(
-                        parent_id=top.id,
-                        child_id=right_side.id,
-                        joint_rule=None,
-                        pos_x=round(target_width * 0.42, 2),
-                        pos_y=round(-target_height * 0.36, 2),
-                        pos_z=0.0,
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-            if divider is not None:
-                joints.append(
-                    JointSpec(
-                        parent_id=top.id,
-                        child_id=divider.id,
-                        joint_rule=None,
-                        pos_x=0.0,
-                        pos_y=round(-target_height * 0.33, 2),
-                        pos_z=0.0,
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-
-        if not pedestal_mode and drawer_fronts:
-            rows = max(1, math.ceil(len(drawer_fronts) / 2))
-            for idx, drawer in enumerate(drawer_fronts):
-                col = idx % 2
-                row = idx // 2
-                x_pos = round((-target_width * 0.42) if col == 0 else (target_width * 0.42), 2)
-                y_start = target_height * 0.22
-                y_step = max(target_height * 0.16, 40.0)
-                y_pos = round(y_start - min(row, rows - 1) * y_step, 2)
-
-                parent_id = top.id if top is not None else drawer.id
-                joints.append(
-                    JointSpec(
-                        parent_id=parent_id,
-                        child_id=drawer.id,
-                        joint_rule=None,
-                        pos_x=x_pos,
-                        pos_y=y_pos,
-                        pos_z=round(target_depth * 0.46, 2),
-                        rot_x=0.0,
-                        rot_y=0.0,
-                        rot_z=0.0,
-                    )
-                )
-
-    joints = _normalize_joints(joints, {component.id for component in components})
+    joints = _normalize_joints(joints, component_by_id)
+    joints = _ensure_minimum_connectivity_joints(components, joints)
 
     warnings: list[str] = []
-    if skipped_names:
-        skipped_set = sorted(set(skipped_names))
-        warnings.append(
-            "Vision-first mode skipped unsupported component kinds: " + ", ".join(skipped_set)
-        )
 
     _extend_validation_warnings(
         warnings=warnings,
@@ -790,12 +875,14 @@ def build_project_model_from_inference(
         product=product,
     )
 
+    _assign_component_transforms(product=product, components=components, joints=joints)
+
     return ProjectModel(
         product=product,
         materials=materials,
         components=components,
         hardware=hardware,
         joints=joints,
-        features=list(_as_iterable(result.get("features"))) if isinstance(result.get("features"), list) else [],
+        features=[],
         warnings=warnings,
     )
