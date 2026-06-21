@@ -442,6 +442,34 @@
     @apply m-0 border-l-4 border-amber-400 pl-2 text-sm text-amber-800;
   }
 
+  .viewer-hardware-legend {
+    @apply mt-1 flex flex-wrap gap-2;
+  }
+
+  .viewer-hardware-pill {
+    @apply rounded-full border px-3 py-1 text-xs font-semibold text-slate-800;
+  }
+
+  .viewer-hardware-pill-screw {
+    @apply border-slate-400 bg-slate-200;
+  }
+
+  .viewer-hardware-pill-cam {
+    @apply border-sky-400 bg-sky-100;
+  }
+
+  .viewer-hardware-pill-slide {
+    @apply border-zinc-500 bg-zinc-200;
+  }
+
+  .viewer-hardware-pill-hinge {
+    @apply border-amber-600 bg-amber-100;
+  }
+
+  .viewer-hardware-pill-generic {
+    @apply border-emerald-500 bg-emerald-100;
+  }
+
   .view-mode-switch {
     @apply inline-flex gap-1 rounded-full border border-border bg-muted/60 p-1;
   }

@@ -218,6 +218,17 @@ export type ProjectModel = {
     width: number;
     height: number;
     depth: number;
+    pos_x: number;
+    pos_y: number;
+    pos_z: number;
+    rot_x_deg: number;
+    rot_y_deg: number;
+    rot_z_deg: number;
+    faces?: Array<{
+      id: string;
+      component_id: string;
+      normal: "+x" | "-x" | "+y" | "-y" | "+z" | "-z";
+    }>;
   }>;
   hardware: Array<{
     id?: string | null;
@@ -237,15 +248,13 @@ export type ProjectModel = {
     }>;
   }>;
   joints?: Array<{
-    parent_id: string;
-    child_id: string;
+    id: string;
+    parent_face_id: string;
+    child_face_id: string;
     joint_rule?: ProjectJointRule | null;
-    pos_x: number;
-    pos_y: number;
-    pos_z: number;
-    rot_x: number;
-    rot_y: number;
-    rot_z: number;
+    offset_u: number;
+    offset_v: number;
+    clearance: number;
   }>;
   features?: Array<{
     component_id: string;
