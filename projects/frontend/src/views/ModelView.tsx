@@ -4,12 +4,15 @@ import { TopologyAdjustmentsPanel } from "../components/TopologyAdjustmentsPanel
 export function ModelView(): React.JSX.Element {
   return (
     <section
-      className="content-grid"
-      style={{ gridTemplateColumns: "1fr" }}
+      className="model-editor-grid"
       aria-label="Model route content"
     >
-      <TopologyAdjustmentsPanel />
-      <ModelInspector />
+      <div className="model-editor-controls">
+        <TopologyAdjustmentsPanel />
+      </div>
+      <div className="model-editor-preview">
+        <ModelInspector />
+      </div>
     </section>
   );
 }

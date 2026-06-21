@@ -141,6 +141,10 @@ export function TopologyAdjustmentsPanel(): React.JSX.Element {
           Finish selection is frontend-only until backend appearance fields are enabled.
         </p>
 
+        <p style={{ margin: 0, fontSize: "0.85rem", opacity: 0.8 }}>
+          The model preview updates in real time while you edit sliders. Changes are saved only when you click the button below.
+        </p>
+
         <button type="submit" disabled={!projectId || !draftSpec}>
           Save topology updates
         </button>

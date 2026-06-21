@@ -150,6 +150,28 @@
     @apply mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.5fr_1fr];
   }
 
+  .model-editor-grid {
+    @apply mt-4 grid grid-cols-1 gap-4;
+  }
+
+  .model-editor-controls,
+  .model-editor-preview {
+    @apply min-w-0;
+  }
+
+  @media (min-width: 1200px) {
+    .model-editor-grid {
+      grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.65fr);
+      align-items: start;
+    }
+
+    .model-editor-controls {
+      position: sticky;
+      top: 1rem;
+      align-self: start;
+    }
+  }
+
   .panel {
     @apply rounded-2xl border border-border bg-card shadow-sm;
   }

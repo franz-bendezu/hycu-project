@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { buildFabricationPackage } from "../domain/fabrication";
 import { useVisionWorkflow } from "../hooks/useVisionWorkflow";
@@ -12,10 +12,56 @@ enum ModelViewMode {
 }
 
 export function ModelInspector(): React.JSX.Element {
-  const { projectId, projectModel, validation, queuedImages, jobId } = useVisionWorkflow();
+  const { projectId, projectModel, draftSpec, validation, queuedImages, jobId } = useVisionWorkflow();
   const [viewMode, setViewMode] = useState<ModelViewMode>(ModelViewMode.THREE_D);
   const completedAnalyses = queuedImages.filter((item) => item.status === "complete").length;
   const failedAnalyses = queuedImages.filter((item) => item.status === "failed").length;
+  const inspectedModel = useMemo(() => {
+    if (!projectModel) {
+      return null;
+    }
+    if (!draftSpec) {
+      return projectModel;
+    }
+    const widthRatio = projectModel.product.target_width > 0
+      ? draftSpec.target_width / projectModel.product.target_width
+      : 1;
+    const heightRatio = projectModel.product.target_height > 0
+      ? draftSpec.target_height / projectModel.product.target_height
+      : 1;
+    const depthRatio = projectModel.product.target_depth > 0
+      ? draftSpec.target_depth / projectModel.product.target_depth
+      : 1;
+
+    return {
+      ...projectModel,
+      product: {
+        ...projectModel.product,
+        ...draftSpec,
+      },
+      components: projectModel.components.map((component) => ({
+        ...component,
+        width: component.width * widthRatio,
+        height: component.height * heightRatio,
+        depth: component.depth * depthRatio,
+        pos_x: component.pos_x * widthRatio,
+        pos_y: component.pos_y * heightRatio,
+        pos_z: component.pos_z * depthRatio,
+      })),
+    };
+  }, [projectModel, draftSpec]);
+
+  const hasUnsavedTopologyChanges = Boolean(
+    projectModel
+    && draftSpec
+    && (
+      draftSpec.target_width !== projectModel.product.target_width
+      || draftSpec.target_height !== projectModel.product.target_height
+      || draftSpec.target_depth !== projectModel.product.target_depth
+      || draftSpec.shelf_count !== projectModel.product.shelf_count
+      || draftSpec.material_thickness !== projectModel.product.material_thickness
+    )
+  );
 
   return (
     <div className="flow-column">
@@ -45,18 +91,26 @@ export function ModelInspector(): React.JSX.Element {
         </div>
 
         {viewMode === ModelViewMode.THREE_D ? (
-          <ParametricViewer model={projectModel} validation={validation} />
+          <ParametricViewer model={inspectedModel} validation={validation} />
         ) : (
           <div className="json-preview-shell">
             <pre className="json-preview-content">
-              {projectModel ? JSON.stringify(projectModel, null, 2) : "No model yet."}
+              {inspectedModel ? JSON.stringify(inspectedModel, null, 2) : "No model yet."}
             </pre>
           </div>
         )}
+        {inspectedModel ? (
+          <p className="model-stat-pill">
+            Preview dimensions: <strong>{inspectedModel.product.target_width}</strong> x <strong>{inspectedModel.product.target_height}</strong> x <strong>{inspectedModel.product.target_depth}</strong> mm, shelves <strong>{inspectedModel.product.shelf_count}</strong>
+          </p>
+        ) : null}
+        {hasUnsavedTopologyChanges ? (
+          <StatusPill label="Live preview with unsaved topology changes" tone="warning" />
+        ) : null}
         <div className="model-stats-grid">
           <p className="model-stat-pill">
-            {projectModel
-              ? `Model: ${projectModel.product.name} (${projectModel.components.length} components)`
+            {inspectedModel
+              ? `Model: ${inspectedModel.product.name} (${inspectedModel.components.length} components)`
               : "No model yet. Create a project to render preview."}
           </p>
           <p className="model-stat-pill">
@@ -72,14 +126,14 @@ export function ModelInspector(): React.JSX.Element {
         title="Hardware and warnings"
         subtitle="Diagram parity: infer assembly hardware and expose warnings"
       >
-        {projectModel ? (
+        {inspectedModel ? (
           <>
             <p>
-              Hardware lines: <strong>{projectModel.hardware.length}</strong>
+              Hardware lines: <strong>{inspectedModel.hardware.length}</strong>
             </p>
-            {projectModel.hardware.length > 0 ? (
+            {inspectedModel.hardware.length > 0 ? (
               <ul>
-                {projectModel.hardware.map((line) => (
+                {inspectedModel.hardware.map((line) => (
                   <li key={`${line.code}-${line.qty}`}>
                     {line.code} x {line.qty}
                   </li>
@@ -88,11 +142,11 @@ export function ModelInspector(): React.JSX.Element {
             ) : (
               <p>No inferred hardware yet.</p>
             )}
-            {projectModel.warnings.length > 0 ? (
+            {inspectedModel.warnings.length > 0 ? (
               <>
                 <StatusPill label="Warnings present" tone="warning" />
                 <ul>
-                  {projectModel.warnings.map((warning) => (
+                  {inspectedModel.warnings.map((warning) => (
                     <li key={warning}>{warning}</li>
                   ))}
                 </ul>
@@ -131,8 +185,8 @@ export function ModelInspector(): React.JSX.Element {
       </SectionCard>
 
       <SectionCard title="Fabrication package preview" subtitle="Bridge to blueprint/BOM export route">
-        {projectModel && projectId ? (() => {
-          const fabrication = buildFabricationPackage(projectId, projectModel, validation);
+        {inspectedModel && projectId ? (() => {
+          const fabrication = buildFabricationPackage(projectId, inspectedModel, validation);
           return (
             <div className="fabrication-preview-grid">
               <p>
